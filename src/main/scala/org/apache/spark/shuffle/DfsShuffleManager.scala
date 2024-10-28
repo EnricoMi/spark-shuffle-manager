@@ -35,15 +35,36 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
     new DfsShuffleHandle(shuffleId, dependency.partitioner, base)
   }
 
-  override def getWriter[K, V](handle: ShuffleHandle, mapId: Long, context: TaskContext, metrics: ShuffleWriteMetricsReporter): ShuffleWriter[K, V] = {
+  override def getWriter[K, V](
+      handle: ShuffleHandle,
+      mapId: Long,
+      context: TaskContext,
+      metrics: ShuffleWriteMetricsReporter
+  ): ShuffleWriter[K, V] = {
     logInfo("creating writer for shuffle " + handle)
     val base = this.base.getWriter[K, V](handle.asInstanceOf[DfsShuffleHandle].base, mapId, context, metrics)
     new DfsShuffleWriter[K, V](handle.asInstanceOf[DfsShuffleHandle], base, mapId, this)
   }
 
-  override def getReader[K, C](handle: ShuffleHandle, startMapIndex: Int, endMapIndex: Int, startPartition: Int, endPartition: Int, context: TaskContext, metrics: ShuffleReadMetricsReporter): ShuffleReader[K, C] = {
+  override def getReader[K, C](
+      handle: ShuffleHandle,
+      startMapIndex: Int,
+      endMapIndex: Int,
+      startPartition: Int,
+      endPartition: Int,
+      context: TaskContext,
+      metrics: ShuffleReadMetricsReporter
+  ): ShuffleReader[K, C] = {
     logInfo("creating writer for shuffle " + handle)
-    val base = this.base.getReader[K, C](handle.asInstanceOf[DfsShuffleHandle].base, startMapIndex, endMapIndex, startPartition, endPartition, context, metrics)
+    val base = this.base.getReader[K, C](
+      handle.asInstanceOf[DfsShuffleHandle].base,
+      startMapIndex,
+      endMapIndex,
+      startPartition,
+      endPartition,
+      context,
+      metrics
+    )
     new DfsShuffleReader[K, C](handle.asInstanceOf[DfsShuffleHandle], base)
   }
 

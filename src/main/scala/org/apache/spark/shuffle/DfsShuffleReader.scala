@@ -18,7 +18,9 @@ package org.apache.spark.shuffle
 
 import org.apache.spark.internal.Logging
 
-class DfsShuffleReader[K, C](handle: DfsShuffleHandle, base: ShuffleReader[K, C]) extends ShuffleReader[K, C] with Logging {
+class DfsShuffleReader[K, C](handle: DfsShuffleHandle, base: ShuffleReader[K, C])
+    extends ShuffleReader[K, C]
+    with Logging {
   override def read(): Iterator[Product2[K, C]] = {
     base.read()
   }

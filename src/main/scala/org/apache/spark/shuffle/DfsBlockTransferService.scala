@@ -16,13 +16,14 @@
 
 package org.apache.spark.shuffle
 
-import org.apache.spark.{SecurityManager, SparkConf}
+import org.apache.spark.internal.Logging
 import org.apache.spark.network.netty.NettyBlockTransferService
 import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager}
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.serializer.SerializerManager
+import org.apache.spark.{SecurityManager, SparkConf}
 
-class BlockTransferService(
+class DfsBlockTransferService(
     conf: SparkConf,
     securityManager: SecurityManager,
     serializerManager: SerializerManager,
@@ -30,9 +31,18 @@ class BlockTransferService(
     hostName: String,
     port: Int,
     numCores: Int,
-    driverEndPointRef: RpcEndpointRef = null) extends NettyBlockTransferService(
-  conf, securityManager, serializerManager, bindAddress, hostName, port, numCores,
-  driverEndPointRef) {
+    driverEndPointRef: RpcEndpointRef = null
+) extends NettyBlockTransferService(
+      conf,
+      securityManager,
+      serializerManager,
+      bindAddress,
+      hostName,
+      port,
+      numCores,
+      driverEndPointRef
+    )
+    with Logging {
 
   override def fetchBlocks(
       host: String,
@@ -40,6 +50,9 @@ class BlockTransferService(
       execId: String,
       blockIds: Array[String],
       listener: BlockFetchingListener,
-      tempFileManager: DownloadFileManager): Unit =
+      tempFileManager: DownloadFileManager
+  ): Unit = {
+    logInfo(s"Fetching ${blockIds.length} blocks from executor $execId on $host:$port")
     super.fetchBlocks(host, port, execId, blockIds, listener, tempFileManager)
+  }
 }

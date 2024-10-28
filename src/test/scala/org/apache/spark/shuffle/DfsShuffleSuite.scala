@@ -25,7 +25,10 @@ import uk.co.gresearch.spark.SparkTestSession
 class DfsShuffleSuite extends AnyFunSuite with SparkTestSession {
   test("ShuffleManager construction") {
     val manager = new DfsShuffleManager(new SparkConf())
-    val dependency = new ShuffleDependency[Int, String, Any](new EmptyRDD[Product2[Int, String]](spark.sparkContext), new ConstantPartitioner)
+    val dependency = new ShuffleDependency[Int, String, Any](
+      new EmptyRDD[Product2[Int, String]](spark.sparkContext),
+      new ConstantPartitioner
+    )
     val context = TaskContext.get()
     val readMetrics = new TempShuffleReadMetrics()
     val writeMetrics = new ShuffleWriteMetrics()
@@ -43,8 +46,10 @@ class DfsShuffleSuite extends AnyFunSuite with SparkTestSession {
     import spark.implicits._
     spark
       .range(1, 100, 1, 10)
-      .groupBy($"id" % 7).count()
-      .groupBy($"count").count()
+      .groupBy($"id" % 7)
+      .count()
+      .groupBy($"count")
+      .count()
       .show(false)
   }
 }

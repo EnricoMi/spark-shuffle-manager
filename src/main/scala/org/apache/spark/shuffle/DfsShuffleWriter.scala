@@ -18,7 +18,13 @@ package org.apache.spark.shuffle
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.MapStatus
 
-class DfsShuffleWriter[K, V](val handle: DfsShuffleHandle, base: ShuffleWriter[K, V], mapId: Long, manager: DfsShuffleManager) extends ShuffleWriter[K, V] with Logging {
+class DfsShuffleWriter[K, V](
+    val handle: DfsShuffleHandle,
+    base: ShuffleWriter[K, V],
+    mapId: Long,
+    manager: DfsShuffleManager
+) extends ShuffleWriter[K, V]
+    with Logging {
   override def write(records: Iterator[Product2[K, V]]): Unit = {
     base.write(records)
     manager.sync(handle, mapId)

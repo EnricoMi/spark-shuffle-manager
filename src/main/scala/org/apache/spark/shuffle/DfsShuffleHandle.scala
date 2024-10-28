@@ -18,6 +18,7 @@ package org.apache.spark.shuffle
 
 import org.apache.spark.Partitioner
 
-class DfsShuffleHandle(shuffleId: Int, val partitioner: Partitioner, val base: ShuffleHandle) extends ShuffleHandle(shuffleId) {
-  override def toString() : String = { String.valueOf(shuffleId) }
+class DfsShuffleHandle(shuffleId: Int, val partitioner: Partitioner, val base: ShuffleHandle)
+    extends ShuffleHandle(shuffleId) {
+  override def toString(): String = { String.valueOf(shuffleId) }
 }
