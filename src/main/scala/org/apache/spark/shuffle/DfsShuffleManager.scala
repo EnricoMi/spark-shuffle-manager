@@ -20,12 +20,21 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 
+import java.io.File
+import java.nio.file.{CopyOption, Files, Path, StandardCopyOption}
 import java.util.Collections
 
 class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging {
   logInfo("DfsShuffleManager created")
   val base = new SortShuffleManager(conf)
   lazy val resolver = new IndexShuffleBlockResolver(conf, SparkEnv.get.blockManager, Collections.emptyMap())
+
+  private val dfsPath = conf
+    .getOption("spark.shuffle.dfs.path")
+    .map(new File(_))
+    .getOrElse(
+      throw new RuntimeException("DFS Shuffle Manager requires option spark.shuffle.dfs.path")
+    )
 
   override val shuffleBlockResolver = new DfsShuffleBlockResolver(base.shuffleBlockResolver)
 
@@ -69,7 +78,22 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
   }
 
   def sync(handle: DfsShuffleHandle, mapId: Long): Unit = {
-    logInfo("syncing " + resolver.getDataFile(handle.shuffleId, mapId))
+    val dataFile = resolver.getDataFile(handle.shuffleId, mapId)
+    val indexFile = resolver.getIndexFile(handle.shuffleId, mapId)
+    Seq(dataFile, indexFile)
+      .map(file =>
+        (
+          file.toPath,
+          Seq(conf.getAppId, handle.shuffleId.toString, file.getParentFile.getName, file.getName)
+            .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
+            .toPath
+        )
+      )
+      .foreach { case (source, destination) =>
+        logInfo(s"copying $source to $destination")
+        destination.getParent.toFile.mkdirs()
+        Files.copy(source, destination, StandardCopyOption.COPY_ATTRIBUTES)
+      }
   }
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
