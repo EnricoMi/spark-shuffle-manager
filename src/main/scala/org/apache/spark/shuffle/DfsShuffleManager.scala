@@ -17,12 +17,16 @@
 package org.apache.spark.shuffle
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.config.APP_ATTEMPT_ID
 import org.apache.spark.shuffle.sort.SortShuffleManager
+import org.apache.spark.util.ThreadUtils
 import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 
 import java.io.File
 import java.nio.file.{CopyOption, Files, Path, StandardCopyOption}
 import java.util.Collections
+import java.util.concurrent.{Future, TimeUnit}
+import scala.concurrent.ExecutionContext
 
 class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging {
   logInfo("DfsShuffleManager created")
@@ -35,6 +39,10 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
     .getOrElse(
       throw new RuntimeException("DFS Shuffle Manager requires option spark.shuffle.dfs.path")
     )
+
+  private val syncThreadPool =
+    ThreadUtils.newDaemonCachedThreadPool("dfs-shuffle-manager-sync-thread-pool", 16)
+  private implicit val syncExecutionContext = ExecutionContext.fromExecutorService(syncThreadPool)
 
   override val shuffleBlockResolver = new DfsShuffleBlockResolver(base.shuffleBlockResolver)
 
@@ -77,23 +85,23 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
     new DfsShuffleReader[K, C](handle.asInstanceOf[DfsShuffleHandle], base)
   }
 
-  def sync(handle: DfsShuffleHandle, mapId: Long): Unit = {
-    val dataFile = resolver.getDataFile(handle.shuffleId, mapId)
-    val indexFile = resolver.getIndexFile(handle.shuffleId, mapId)
+  def sync(handle: DfsShuffleHandle, mapId: Long): Seq[Future[_]] = {
+    def getDestination(path: Path): Path = {
+      val file = path.toFile
+      Seq(
+        conf.getAppId,
+        conf.get(APP_ATTEMPT_ID.key, "null"),
+        handle.shuffleId.toString,
+        file.getParentFile.getName,
+        file.getName
+      ).foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }.toPath
+    }
+
+    val dataFile = resolver.getDataFile(handle.shuffleId, mapId).toPath
+    val indexFile = resolver.getIndexFile(handle.shuffleId, mapId).toPath
     Seq(dataFile, indexFile)
-      .map(file =>
-        (
-          file.toPath,
-          Seq(conf.getAppId, handle.shuffleId.toString, file.getParentFile.getName, file.getName)
-            .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
-            .toPath
-        )
-      )
-      .foreach { case (source, destination) =>
-        logInfo(s"copying $source to $destination")
-        destination.getParent.toFile.mkdirs()
-        Files.copy(source, destination, StandardCopyOption.COPY_ATTRIBUTES)
-      }
+      .map(path => SyncTask(path, getDestination(path)))
+      .map(syncExecutionContext.submit)
   }
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
@@ -103,7 +111,17 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
 
   override def stop(): Unit = {
     logInfo("stopping manager")
+    syncThreadPool.shutdown()
+    syncExecutionContext.awaitTermination(1, TimeUnit.MINUTES)
     shuffleBlockResolver.stop()
     base.stop()
+  }
+}
+
+case class SyncTask(source: Path, destination: Path) extends Runnable with Logging {
+  override def run(): Unit = {
+    logInfo(s"copying $source to $destination")
+    destination.getParent.toFile.mkdirs()
+    Files.copy(source, destination, StandardCopyOption.COPY_ATTRIBUTES)
   }
 }

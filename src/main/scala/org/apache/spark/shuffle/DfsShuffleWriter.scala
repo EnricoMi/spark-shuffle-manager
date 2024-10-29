@@ -18,6 +18,9 @@ package org.apache.spark.shuffle
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.MapStatus
 
+import java.util.concurrent.Future
+import scala.collection.mutable
+
 class DfsShuffleWriter[K, V](
     val handle: DfsShuffleHandle,
     base: ShuffleWriter[K, V],
@@ -25,13 +28,24 @@ class DfsShuffleWriter[K, V](
     manager: DfsShuffleManager
 ) extends ShuffleWriter[K, V]
     with Logging {
+  private val futures: mutable.Buffer[Future[_]] = mutable.Buffer()
+
   override def write(records: Iterator[Product2[K, V]]): Unit = {
     base.write(records)
-    manager.sync(handle, mapId)
+    futures.addAll(manager.sync(handle, mapId))
   }
 
   override def stop(success: Boolean): Option[MapStatus] = {
     logInfo("stopping writer with success=" + success)
+
+    if (success) {
+      // wait for all sync tasks to complete
+      futures.foreach(_.get())
+    } else {
+      // cancel all sync tasks
+      futures.foreach(_.cancel(true))
+    }
+
     base.stop(success)
   }
 
