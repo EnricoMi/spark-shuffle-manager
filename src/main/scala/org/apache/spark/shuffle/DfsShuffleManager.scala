@@ -27,6 +27,8 @@ import java.nio.file.{CopyOption, Files, Path, StandardCopyOption}
 import java.util.Collections
 import java.util.concurrent.{Future, TimeUnit}
 import scala.concurrent.ExecutionContext
+import scala.reflect.io.Directory
+import scala.util.Try
 
 class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging {
   logInfo("DfsShuffleManager created")
@@ -85,28 +87,32 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
     new DfsShuffleReader[K, C](handle.asInstanceOf[DfsShuffleHandle], base)
   }
 
-  def sync(handle: DfsShuffleHandle, mapId: Long): Seq[Future[_]] = {
-    def getDestination(path: Path): Path = {
-      val file = path.toFile
-      Seq(
-        conf.getAppId,
-        conf.get(APP_ATTEMPT_ID.key, "null"),
-        handle.shuffleId.toString,
-        file.getParentFile.getName,
-        file.getName
-      ).foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }.toPath
-    }
+  private def getDestination(shuffleId: Int, parts: String*): Path = {
+    (Seq(conf.getAppId, conf.get(APP_ATTEMPT_ID.key, "null"), shuffleId.toString) ++ parts)
+      .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
+      .toPath
+  }
 
+  def sync(handle: DfsShuffleHandle, mapId: Long): Seq[Future[_]] = {
     val dataFile = resolver.getDataFile(handle.shuffleId, mapId).toPath
     val indexFile = resolver.getIndexFile(handle.shuffleId, mapId).toPath
     Seq(dataFile, indexFile)
-      .map(path => SyncTask(path, getDestination(path)))
+      .map(path => SyncTask(path, getDestination(handle.shuffleId, path.getParent.toFile.getName, path.toFile.getName)))
       .map(syncExecutionContext.submit)
+  }
+
+  private def removeDir(path: Path): Boolean = {
+    logInfo(f"removing $path")
+    Try(() => new Directory(path.toFile).deleteRecursively()).recover {
+      case t: Throwable => logWarning(f"Failed to delete directory $path", t)
+    }.isSuccess
   }
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
     logInfo("unregistering shuffle id " + shuffleId)
-    base.unregisterShuffle(shuffleId) && true
+    val removed = removeDir(getDestination(shuffleId))
+    val unregistered = base.unregisterShuffle(shuffleId)
+    removed && unregistered
   }
 
   override def stop(): Unit = {

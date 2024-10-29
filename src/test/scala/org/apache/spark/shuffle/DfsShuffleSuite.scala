@@ -51,5 +51,6 @@ class DfsShuffleSuite extends AnyFunSuite with SparkTestSession {
       .groupBy($"count")
       .count()
       .show(false)
+    spark.range(1, 100).show()
   }
 }
