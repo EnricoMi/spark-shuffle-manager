@@ -20,11 +20,10 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.APP_ATTEMPT_ID
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.util.ThreadUtils
-import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
+import org.apache.spark.{ShuffleDependency, SparkConf, TaskContext}
 
 import java.io.File
-import java.nio.file.{CopyOption, Files, Path, StandardCopyOption}
-import java.util.Collections
+import java.nio.file.{Files, Path, StandardCopyOption}
 import java.util.concurrent.{Future, TimeUnit}
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService}
@@ -34,7 +33,6 @@ import scala.util.Try
 class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging {
   logInfo("DfsShuffleManager created")
   val base = new SortShuffleManager(conf)
-  lazy val resolver = new IndexShuffleBlockResolver(conf, SparkEnv.get.blockManager, Collections.emptyMap())
 
   private val dfsPath = conf
     .getOption("spark.shuffle.dfs.path")
@@ -49,7 +47,7 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
     ExecutionContext.fromExecutorService(syncThreadPool)
   private val syncTasks: mutable.Buffer[Future[_]] = mutable.Buffer()
 
-  override val shuffleBlockResolver = new DfsShuffleBlockResolver(base.shuffleBlockResolver)
+  override val shuffleBlockResolver: IndexShuffleBlockResolver = base.shuffleBlockResolver
 
   override def registerShuffle[K, V, C](shuffleId: Int, dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
     logInfo("registering shuffle id " + shuffleId)
@@ -97,8 +95,8 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
   }
 
   def sync(handle: DfsShuffleHandle, mapId: Long): Unit = {
-    val dataFile = resolver.getDataFile(handle.shuffleId, mapId).toPath
-    val indexFile = resolver.getIndexFile(handle.shuffleId, mapId).toPath
+    val dataFile = shuffleBlockResolver.getDataFile(handle.shuffleId, mapId).toPath
+    val indexFile = shuffleBlockResolver.getIndexFile(handle.shuffleId, mapId).toPath
     Seq(dataFile, indexFile)
       .map(path => SyncTask(path, getDestination(handle.shuffleId, path.getParent.toFile.getName, path.toFile.getName)))
       .map(syncExecutionContext.submit)
