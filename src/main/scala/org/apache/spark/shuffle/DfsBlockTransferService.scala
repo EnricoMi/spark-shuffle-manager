@@ -27,6 +27,7 @@ import org.apache.spark.storage.BlockId
 import org.apache.spark.{SecurityManager, SparkConf, SparkEnv}
 
 import java.io.File
+import scala.collection.mutable
 import scala.util.{Failure, Success, Try}
 
 class DfsBlockTransferService(
@@ -62,6 +63,19 @@ class DfsBlockTransferService(
       .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
       .getPath
 
+  private case class BlockIdStateListener(delegate: BlockFetchingListener) extends BlockFetchingListener {
+    val failedBlockIds: mutable.Buffer[String] = mutable.Buffer[String]()
+
+    override def onBlockFetchSuccess(blockId: String, data: ManagedBuffer): Unit = {
+      delegate.onBlockFetchSuccess(blockId, data)
+    }
+
+    override def onBlockFetchFailure(blockId: String, exception: Throwable): Unit = {
+      logWarning(f"Failed to read block id $blockId", exception)
+      failedBlockIds += blockId
+    }
+  }
+
   override def fetchBlocks(
       host: String,
       port: Int,
@@ -72,30 +86,38 @@ class DfsBlockTransferService(
   ): Unit = {
     // TODO: all shuffle blocks are read from dfs atm, make this configurable
     // TODO: implement detecting / memorizing dead executors
+    val stateListener = BlockIdStateListener(listener)
     val executorIsAlive = blockIds.exists(!BlockId.apply(_).isShuffle)
-    if (executorIsAlive) {
+    val pendingBlockIds = if (executorIsAlive) {
       try {
         logInfo(
           s"Fetching ${blockIds.length} blocks from executor $execId on $host:$port"
         )
-        // TODO: super.fetchBlocks will call listener.onBlockFetchFailure for failed blockIds
-        //       these calls need to be intercepted, only those blockIds need to be fetched below
-        super.fetchBlocks(host, port, execId, blockIds, listener, tempFileManager)
-        return
+        // super.fetchBlocks calls listener.onBlockFetchFailure for failed blockIds,
+        // intercept this via stateListener
+        super.fetchBlocks(host, port, execId, blockIds, stateListener, tempFileManager)
+        stateListener.failedBlockIds.toArray
       } catch {
-        case _: Exception => // TODO: mark executor as dead
+        case _: Exception =>
+          // TODO: mark executor as dead
+          stateListener.failedBlockIds.toArray
       }
+    } else {
+      blockIds
     }
 
-    logInfo(s"Fetching ${blockIds.length} blocks from dfs}")
+    // fetch only the pending block ids from dfs
+    if (pendingBlockIds.nonEmpty) {
+      logInfo(s"Fetching ${pendingBlockIds.length} blocks from dfs}")
 
-    blockIds
-      .map(BlockId.apply)
-      .map(blockId => blockId -> read(blockId))
-      .foreach {
-        case (blockId, Success(buffer)) => write(blockId, buffer, Option(tempFileManager), listener)
-        case (blockId, Failure(t))      => listener.onBlockFetchFailure(blockId.name, t)
-      }
+      pendingBlockIds
+        .map(BlockId.apply)
+        .map(blockId => blockId -> read(blockId))
+        .foreach {
+          case (blockId, Success(buffer)) => write(blockId, buffer, Option(tempFileManager), listener)
+          case (blockId, Failure(t))      => listener.onBlockFetchFailure(blockId.name, t)
+        }
+    }
   }
 
   private def read(blockId: BlockId): Try[ManagedBuffer] = {
