@@ -20,12 +20,24 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.APP_ATTEMPT_ID
 import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
 import org.apache.spark.network.netty.{NettyBlockTransferService, SparkTransportConf}
-import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager, DownloadFileWritableChannel, ExecutorDiskUtils}
+import org.apache.spark.network.shuffle.{
+  BlockFetchingListener,
+  DownloadFileManager,
+  DownloadFileWritableChannel,
+  ExecutorDiskUtils
+}
 import org.apache.spark.network.util.{MapConfigProvider, TransportConf}
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.serializer.SerializerManager
 import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
-import org.apache.spark.storage.{BlockId, BlockManager, ShuffleBlockBatchId, ShuffleBlockId, ShuffleDataBlockId, ShuffleIndexBlockId}
+import org.apache.spark.storage.{
+  BlockId,
+  BlockManager,
+  ShuffleBlockBatchId,
+  ShuffleBlockId,
+  ShuffleDataBlockId,
+  ShuffleIndexBlockId
+}
 import org.apache.spark.{SecurityManager, SparkConf, SparkEnv, SparkException}
 
 import java.io.{DataInputStream, File}

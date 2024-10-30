@@ -26,7 +26,8 @@ import java.io.File
 import java.nio.file.{CopyOption, Files, Path, StandardCopyOption}
 import java.util.Collections
 import java.util.concurrent.{Future, TimeUnit}
-import scala.concurrent.ExecutionContext
+import scala.collection.mutable
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService}
 import scala.reflect.io.Directory
 import scala.util.Try
 
@@ -44,7 +45,9 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
 
   private val syncThreadPool =
     ThreadUtils.newDaemonCachedThreadPool("dfs-shuffle-manager-sync-thread-pool", 16)
-  private implicit val syncExecutionContext = ExecutionContext.fromExecutorService(syncThreadPool)
+  private implicit val syncExecutionContext: ExecutionContextExecutorService =
+    ExecutionContext.fromExecutorService(syncThreadPool)
+  private val syncTasks: mutable.Buffer[Future[_]] = mutable.Buffer()
 
   override val shuffleBlockResolver = new DfsShuffleBlockResolver(base.shuffleBlockResolver)
 
@@ -93,18 +96,19 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
       .toPath
   }
 
-  def sync(handle: DfsShuffleHandle, mapId: Long): Seq[Future[_]] = {
+  def sync(handle: DfsShuffleHandle, mapId: Long): Unit = {
     val dataFile = resolver.getDataFile(handle.shuffleId, mapId).toPath
     val indexFile = resolver.getIndexFile(handle.shuffleId, mapId).toPath
     Seq(dataFile, indexFile)
       .map(path => SyncTask(path, getDestination(handle.shuffleId, path.getParent.toFile.getName, path.toFile.getName)))
       .map(syncExecutionContext.submit)
+      .foreach(syncTasks.addOne)
   }
 
   private def removeDir(path: Path): Boolean = {
     logInfo(f"removing $path")
-    Try(() => new Directory(path.toFile).deleteRecursively()).recover {
-      case t: Throwable => logWarning(f"Failed to delete directory $path", t)
+    Try(() => new Directory(path.toFile).deleteRecursively()).recover { case t: Throwable =>
+      logWarning(f"Failed to delete directory $path", t)
     }.isSuccess
   }
 
@@ -117,8 +121,17 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
 
   override def stop(): Unit = {
     logInfo("stopping manager")
+
+    // wait or sync tasks to finish
     syncThreadPool.shutdown()
-    syncExecutionContext.awaitTermination(1, TimeUnit.MINUTES)
+    syncTasks
+      .map(task => Try(() => task.get()))
+      .filter(_.isFailure)
+      .map(_.failed.get)
+      .foreach(logWarning("copying file failed", _))
+    syncExecutionContext.awaitTermination(1, TimeUnit.SECONDS)
+
+    // stop underlying instances
     shuffleBlockResolver.stop()
     base.stop()
   }
