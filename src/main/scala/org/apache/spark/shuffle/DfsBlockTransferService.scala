@@ -70,32 +70,24 @@ class DfsBlockTransferService(
       listener: BlockFetchingListener,
       tempFileManager: DownloadFileManager
   ): Unit = {
-    logInfo(
-      s"Fetching ${blockIds.length} blocks from executor $execId on $host:$port: ${blockIds.slice(0, 10).mkString(", ")}"
-    )
+    // TODO: all shuffle blocks are read from dfs atm, make this configurable
+    // TODO: implement detecting / memorizing dead executors
     val executorIsAlive = blockIds.exists(!BlockId.apply(_).isShuffle)
     if (executorIsAlive) {
       try {
+        logInfo(
+          s"Fetching ${blockIds.length} blocks from executor $execId on $host:$port"
+        )
         // TODO: super.fetchBlocks will call listener.onBlockFetchFailure for failed blockIds
         //       these calls need to be intercepted, only those blockIds need to be fetched below
         super.fetchBlocks(host, port, execId, blockIds, listener, tempFileManager)
         return
       } catch {
-        case _: Exception => // mark executor as dead
+        case _: Exception => // TODO: mark executor as dead
       }
     }
 
-    logInfo(
-      s"Fetching ${blockIds.length} blocks from dfs: ${blockIds.slice(0, 10).mkString(", ")}"
-    )
-    // BlockId.apply(blockId)
-    // blockmanager.getLocalBlockData uses shuffleManager.shuffleBlockResolver.getBlockData(blockId)
-    // IndexShuffleBlockResolver reads from local files
-    // instantitate BlockManager with IndexShuffleBlockResolver configured with locally mounted dfs path and use blockmanager.getLocalBlockData(blockid) as fallback
-    // val envBlockManager = SparkEnv.get.blockManager
-    // val blockManager = new BlockManager(envBlockManager.executorId, null, envBlockManager.master)
-    // val resolver = new IndexShuffleBlockResolver(conf, blockManager, java.util.Map.ofEntries())
-    // val blockResolver = new IndexShuffleBlockResolver(conf, blockManager, Collections.emptyMap)
+    logInfo(s"Fetching ${blockIds.length} blocks from dfs}")
 
     blockIds
       .map(BlockId.apply)
