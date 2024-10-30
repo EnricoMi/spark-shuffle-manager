@@ -30,9 +30,8 @@ import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService}
 import scala.reflect.io.Directory
 import scala.util.Try
 
-class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging {
+class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) with Logging {
   logInfo("DfsShuffleManager created")
-  val base = new SortShuffleManager(conf)
 
   private val dfsPath = conf
     .getOption("spark.shuffle.dfs.path")
@@ -47,12 +46,10 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
     ExecutionContext.fromExecutorService(syncThreadPool)
   private val syncTasks: mutable.Buffer[Future[_]] = mutable.Buffer()
 
-  override val shuffleBlockResolver: IndexShuffleBlockResolver = base.shuffleBlockResolver
-
   override def registerShuffle[K, V, C](shuffleId: Int, dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
     logInfo("registering shuffle id " + shuffleId)
-    val base = this.base.registerShuffle(shuffleId, dependency)
-    new DfsShuffleHandle(shuffleId, dependency.partitioner, base)
+    val handle = super.registerShuffle(shuffleId, dependency)
+    new DfsShuffleHandle(shuffleId, dependency.partitioner, handle)
   }
 
   override def getWriter[K, V](
@@ -62,8 +59,8 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
       metrics: ShuffleWriteMetricsReporter
   ): ShuffleWriter[K, V] = {
     logInfo("creating writer for shuffle " + handle)
-    val base = this.base.getWriter[K, V](handle.asInstanceOf[DfsShuffleHandle].base, mapId, context, metrics)
-    new DfsShuffleWriter[K, V](handle.asInstanceOf[DfsShuffleHandle], base, mapId, this)
+    val writer = super.getWriter[K, V](handle.asInstanceOf[DfsShuffleHandle].handle, mapId, context, metrics)
+    new DfsShuffleWriter[K, V](handle.asInstanceOf[DfsShuffleHandle], writer, mapId, this)
   }
 
   override def getReader[K, C](
@@ -76,8 +73,8 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
       metrics: ShuffleReadMetricsReporter
   ): ShuffleReader[K, C] = {
     logInfo("creating writer for shuffle " + handle)
-    val base = this.base.getReader[K, C](
-      handle.asInstanceOf[DfsShuffleHandle].base,
+    val reader = super.getReader[K, C](
+      handle.asInstanceOf[DfsShuffleHandle].handle,
       startMapIndex,
       endMapIndex,
       startPartition,
@@ -85,7 +82,7 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
       context,
       metrics
     )
-    new DfsShuffleReader[K, C](handle.asInstanceOf[DfsShuffleHandle], base)
+    new DfsShuffleReader[K, C](handle.asInstanceOf[DfsShuffleHandle], reader)
   }
 
   private def getDestination(shuffleId: Int, parts: String*): Path = {
@@ -113,7 +110,7 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
   override def unregisterShuffle(shuffleId: Int): Boolean = {
     logInfo("unregistering shuffle id " + shuffleId)
     val removed = removeDir(getDestination(shuffleId))
-    val unregistered = base.unregisterShuffle(shuffleId)
+    val unregistered = super.unregisterShuffle(shuffleId)
     removed && unregistered
   }
 
@@ -129,9 +126,8 @@ class DfsShuffleManager(val conf: SparkConf) extends ShuffleManager with Logging
       .foreach(logWarning("copying file failed", _))
     syncExecutionContext.awaitTermination(1, TimeUnit.SECONDS)
 
-    // stop underlying instances
-    shuffleBlockResolver.stop()
-    base.stop()
+    // stop underlying manager
+    super.stop()
   }
 }
 

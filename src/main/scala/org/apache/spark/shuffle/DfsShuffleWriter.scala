@@ -20,14 +20,14 @@ import org.apache.spark.scheduler.MapStatus
 
 class DfsShuffleWriter[K, V](
     val handle: DfsShuffleHandle,
-    base: ShuffleWriter[K, V],
+    writer: ShuffleWriter[K, V],
     mapId: Long,
     manager: DfsShuffleManager
 ) extends ShuffleWriter[K, V]
     with Logging {
 
   override def write(records: Iterator[Product2[K, V]]): Unit = {
-    base.write(records)
+    writer.write(records)
   }
 
   override def stop(success: Boolean): Option[MapStatus] = {
@@ -35,10 +35,10 @@ class DfsShuffleWriter[K, V](
     if (success) {
       manager.sync(handle, mapId)
     }
-    base.stop(success)
+    writer.stop(success)
   }
 
   override def getPartitionLengths(): Array[Long] = {
-    base.getPartitionLengths()
+    writer.getPartitionLengths()
   }
 }
