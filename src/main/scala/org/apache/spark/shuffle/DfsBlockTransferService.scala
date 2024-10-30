@@ -76,6 +76,8 @@ class DfsBlockTransferService(
     val executorIsAlive = blockIds.exists(!BlockId.apply(_).isShuffle)
     if (executorIsAlive) {
       try {
+        // TODO: super.fetchBlocks will call listener.onBlockFetchFailure for failed blockIds
+        //       these calls need to be intercepted, only those blockIds need to be fetched below
         super.fetchBlocks(host, port, execId, blockIds, listener, tempFileManager)
         return
       } catch {
@@ -93,40 +95,39 @@ class DfsBlockTransferService(
     // val envBlockManager = SparkEnv.get.blockManager
     // val blockManager = new BlockManager(envBlockManager.executorId, null, envBlockManager.master)
     // val resolver = new IndexShuffleBlockResolver(conf, blockManager, java.util.Map.ofEntries())
-
-    val blockManager = SparkEnv.get.blockManager
-    if (blockManager == null) {
-      throw new IllegalStateException("No blockManager available from the SparkEnv.")
-    }
     // val blockResolver = new IndexShuffleBlockResolver(conf, blockManager, Collections.emptyMap)
 
-    def write(buffer: ManagedBuffer, channel: DownloadFileWritableChannel): ManagedBuffer = {
-      channel.write(buffer.nioByteBuffer())
-      buffer
-    }
-
-    val transportConf = SparkTransportConf.fromSparkConf(conf, "shuffle", numCores)
-    val channel = Option(tempFileManager).map(_.createTempFile(transportConf).openForWriting())
     blockIds
       .map(BlockId.apply)
-      .map(blockId =>
-        (
-          blockId,
-          Try(blockManager.getHostLocalShuffleData(blockId, Array(getDfsPath(blockId.name.split("_")(1)))))
-        )
-      )
+      .map(blockId => blockId -> read(blockId))
       .foreach {
-        case (blockId, Success(buffer)) =>
-          channel match {
-            case Some(channel) => write(buffer, channel)
-            case None          => listener.onBlockFetchSuccess(blockId.name, buffer)
-          }
-        case (blockId, Failure(t)) =>
-          channel match {
-            case Some(_) =>
-            case None    => listener.onBlockFetchFailure(blockId.name, t)
-          }
+        case (blockId, Success(buffer)) => write(blockId, buffer, Option(tempFileManager), listener)
+        case (blockId, Failure(t))      => listener.onBlockFetchFailure(blockId.name, t)
       }
-    channel.foreach(_.closeAndRead())
+  }
+
+  private def read(blockId: BlockId): Try[ManagedBuffer] = {
+    val subId = blockId.name.split("_")(1)
+    val dfsPath = getDfsPath(subId)
+    Try(SparkEnv.get.blockManager.getHostLocalShuffleData(blockId, Array(dfsPath)))
+  }
+
+  private def write(
+      blockId: BlockId,
+      buffer: ManagedBuffer,
+      fileManager: Option[DownloadFileManager],
+      listener: BlockFetchingListener
+  ): Unit = {
+    if (fileManager.isDefined) {
+      val file = fileManager.get.createTempFile(transportConf)
+      val channel = file.openForWriting()
+      channel.write(buffer.nioByteBuffer())
+      listener.onBlockFetchSuccess(blockId.name, channel.closeAndRead())
+      if (!fileManager.get.registerTempFileToClean(file)) {
+        file.delete()
+      }
+    } else {
+      listener.onBlockFetchSuccess(blockId.name, buffer)
+    }
   }
 }
