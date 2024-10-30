@@ -73,7 +73,7 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
       metrics: ShuffleReadMetricsReporter
   ): ShuffleReader[K, C] = {
     logInfo("creating writer for shuffle " + handle)
-    val reader = super.getReader[K, C](
+    super.getReader[K, C](
       handle.asInstanceOf[DfsShuffleHandle].handle,
       startMapIndex,
       endMapIndex,
@@ -82,7 +82,6 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
       context,
       metrics
     )
-    new DfsShuffleReader[K, C](handle.asInstanceOf[DfsShuffleHandle], reader)
   }
 
   private def getDestination(shuffleId: Int, parts: String*): Path = {
