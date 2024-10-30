@@ -18,32 +18,15 @@ package org.apache.spark.shuffle
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.APP_ATTEMPT_ID
-import org.apache.spark.network.buffer.{FileSegmentManagedBuffer, ManagedBuffer}
+import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.network.netty.{NettyBlockTransferService, SparkTransportConf}
-import org.apache.spark.network.shuffle.{
-  BlockFetchingListener,
-  DownloadFileManager,
-  DownloadFileWritableChannel,
-  ExecutorDiskUtils
-}
-import org.apache.spark.network.util.{MapConfigProvider, TransportConf}
+import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager, DownloadFileWritableChannel}
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.serializer.SerializerManager
-import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
-import org.apache.spark.storage.{
-  BlockId,
-  BlockManager,
-  ShuffleBlockBatchId,
-  ShuffleBlockId,
-  ShuffleDataBlockId,
-  ShuffleIndexBlockId
-}
-import org.apache.spark.{SecurityManager, SparkConf, SparkEnv, SparkException}
+import org.apache.spark.storage.BlockId
+import org.apache.spark.{SecurityManager, SparkConf, SparkEnv}
 
-import java.io.{DataInputStream, File}
-import java.nio.channels.Channels
-import java.nio.file.Files
-import java.util.Collections
+import java.io.File
 import scala.util.{Failure, Success, Try}
 
 class DfsBlockTransferService(
@@ -67,14 +50,14 @@ class DfsBlockTransferService(
     )
     with Logging {
 
-  val dfsPath = conf
+  val dfsPath: File = conf
     .getOption("spark.shuffle.dfs.path")
     .map(new File(_))
     .getOrElse(
       throw new RuntimeException("DFS Shuffle Manager requires option spark.shuffle.dfs.path")
     )
 
-  def getDfsPath(sub: String): String =
+  private def getDfsPath(sub: String): String =
     Seq(conf.getAppId, conf.get(APP_ATTEMPT_ID.key, "null"), sub)
       .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
       .getPath
