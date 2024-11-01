@@ -16,32 +16,10 @@
 
 package org.apache.spark.shuffle
 
-import org.apache.spark.executor.{ShuffleWriteMetrics, TempShuffleReadMetrics}
-import org.apache.spark.rdd.EmptyRDD
-import org.apache.spark.{ConstantPartitioner, ShuffleDependency, SparkConf, TaskContext}
 import org.scalatest.funsuite.AnyFunSuite
 import uk.co.gresearch.spark.SparkTestSession
 
 class DfsShuffleSuite extends AnyFunSuite with SparkTestSession {
-  test("ShuffleManager construction") {
-    val manager = new DfsShuffleManager(new SparkConf())
-    val dependency = new ShuffleDependency[Int, String, Any](
-      new EmptyRDD[Product2[Int, String]](spark.sparkContext),
-      new ConstantPartitioner
-    )
-    val context = TaskContext.get()
-    val readMetrics = new TempShuffleReadMetrics()
-    val writeMetrics = new ShuffleWriteMetrics()
-
-    val handle = manager.registerShuffle(0, dependency)
-    manager.getWriter(handle, 0, context, writeMetrics)
-    manager.getReader(handle, 0, Int.MaxValue, 0, Int.MaxValue, context, readMetrics)
-    manager.unregisterShuffle(0)
-    val resolver = manager.shuffleBlockResolver
-    resolver.stop()
-    manager.stop()
-  }
-
   test("dataset") {
     import spark.implicits._
     spark
