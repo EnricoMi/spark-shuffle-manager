@@ -108,7 +108,7 @@ class DfsBlockTransferService(
 
     // fetch only the pending block ids from dfs
     if (pendingBlockIds.nonEmpty) {
-      logInfo(s"Fetching ${pendingBlockIds.length} blocks from dfs}")
+      logInfo(s"Fetching ${pendingBlockIds.length} blocks from dfs")
 
       pendingBlockIds
         .map(BlockId.apply)
@@ -123,6 +123,7 @@ class DfsBlockTransferService(
   private def read(blockId: BlockId): Try[ManagedBuffer] = {
     val subId = blockId.name.split("_")(1)
     val dfsPath = getDfsPath(subId)
+    logInfo(f"Reading $blockId from dfs: $dfsPath")
     Try(SparkEnv.get.blockManager.getHostLocalShuffleData(blockId, Array(dfsPath)))
   }
 
