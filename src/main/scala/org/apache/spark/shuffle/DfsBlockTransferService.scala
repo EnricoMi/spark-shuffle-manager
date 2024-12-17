@@ -18,17 +18,22 @@ package org.apache.spark.shuffle
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.APP_ATTEMPT_ID
+import org.apache.spark.network.BlockDataManager
 import org.apache.spark.network.buffer.ManagedBuffer
 import org.apache.spark.network.netty.{NettyBlockTransferService, SparkTransportConf}
 import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager, DownloadFileWritableChannel}
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.serializer.SerializerManager
-import org.apache.spark.storage.BlockId
+import org.apache.spark.storage.{BlockId, BlockManager}
 import org.apache.spark.{SecurityManager, SparkConf, SparkEnv}
 
 import java.io.File
+import java.util
+import java.util.Map
+import java.util.concurrent.CompletableFuture
 import scala.collection.mutable
 import scala.util.{Failure, Success, Try}
+import scala.jdk.CollectionConverters._
 
 class DfsBlockTransferService(
     conf: SparkConf,
@@ -50,6 +55,13 @@ class DfsBlockTransferService(
       driverEndPointRef
     )
     with Logging {
+
+  var blockManager: Option[BlockManager] = None
+
+  override def init(blockDataManager: BlockDataManager): Unit = {
+    super.init(blockDataManager)
+    blockManager = Some(blockDataManager.asInstanceOf[BlockManager])
+  }
 
   val dfsPath: File = conf
     .getOption("spark.shuffle.dfs.path")
@@ -73,6 +85,26 @@ class DfsBlockTransferService(
     override def onBlockFetchFailure(blockId: String, exception: Throwable): Unit = {
       logWarning(f"Failed to read block id $blockId", exception)
       failedBlockIds += blockId
+    }
+  }
+
+  override def getHostLocalDirs(
+      host: String,
+      port: Int,
+      execIds: Array[String],
+      hostLocalDirsCompletable: CompletableFuture[util.Map[String, Array[String]]]
+  ): Unit = {
+    val thisExecId = blockManager.get.executorId
+    if (execIds.length != 1 || execIds.exists(_ != thisExecId)) {
+      // all executors have the same host "local" DFS directory
+      val dir = Seq(conf.getAppId, conf.get(APP_ATTEMPT_ID.key, "null"))
+        .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
+        .getPath
+      logInfo(f"Getting hostLocalDirs for executor ids ${execIds.mkString(", ")}: $dir")
+      val map = execIds.map(execId => execId -> Array(dir)).toMap.asJava
+      hostLocalDirsCompletable.complete(map)
+    } else {
+      super.getHostLocalDirs(host, port, execIds, hostLocalDirsCompletable)
     }
   }
 
