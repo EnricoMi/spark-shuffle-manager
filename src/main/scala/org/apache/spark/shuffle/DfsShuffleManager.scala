@@ -96,7 +96,7 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
     Seq(dataFile, indexFile)
       .map(path => SyncTask(path, getDestination(handle.shuffleId, path.getParent.toFile.getName, path.toFile.getName)))
       .map(syncExecutionContext.submit)
-      .foreach(syncTasks.addOne)
+      .foreach(syncTasks+=(_))
   }
 
   private def removeDir(path: Path): Boolean = {
