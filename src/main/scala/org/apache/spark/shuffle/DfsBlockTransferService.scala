@@ -16,24 +16,28 @@
 
 package org.apache.spark.shuffle
 
+import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.APP_ATTEMPT_ID
 import org.apache.spark.network.BlockDataManager
-import org.apache.spark.network.buffer.ManagedBuffer
-import org.apache.spark.network.netty.{NettyBlockTransferService, SparkTransportConf}
-import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager, DownloadFileWritableChannel}
+import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
+import org.apache.spark.network.netty.NettyBlockTransferService
+import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager}
+import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rpc.RpcEndpointRef
 import org.apache.spark.serializer.SerializerManager
-import org.apache.spark.storage.{BlockId, BlockManager}
-import org.apache.spark.{SecurityManager, SparkConf, SparkEnv}
+import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
+import org.apache.spark.storage.{BlockId, BlockManager, ShuffleBlockBatchId, ShuffleBlockId, ShuffleDataBlockId, ShuffleIndexBlockId}
+import org.apache.spark.util.Utils
+import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 
-import java.io.File
+import java.io.DataInputStream
+import java.nio.ByteBuffer
 import java.util
-import java.util.Map
 import java.util.concurrent.CompletableFuture
 import scala.collection.mutable
 import scala.util.{Failure, Success, Try}
-import scala.jdk.CollectionConverters._
 
 class DfsBlockTransferService(
     conf: SparkConf,
@@ -63,17 +67,18 @@ class DfsBlockTransferService(
     blockManager = Some(blockDataManager.asInstanceOf[BlockManager])
   }
 
-  val dfsPath: File = conf
+  private val dfsPath = conf
     .getOption("spark.shuffle.dfs.path")
-    .map(new File(_))
+    .map(new Path(_))
     .getOrElse(
       throw new RuntimeException("DFS Shuffle Manager requires option spark.shuffle.dfs.path")
     )
+  private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
+  private val fileSystem = FileSystem.get(dfsPath.toUri, hadoopConf)
 
-  private def getDfsPath(sub: String): String =
-    Seq(conf.getAppId, conf.get(APP_ATTEMPT_ID.key, "null"), sub)
-      .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
-      .getPath
+  private def getDfsPath(sub: String): Path =
+    Seq(appId, conf.get(APP_ATTEMPT_ID.key, "null"), sub)
+      .foldLeft(dfsPath) { case (dir, part) => new Path(dir, part) }
 
   private case class BlockIdStateListener(delegate: BlockFetchingListener) extends BlockFetchingListener {
     val failedBlockIds: mutable.Buffer[String] = mutable.Buffer[String]()
@@ -96,13 +101,7 @@ class DfsBlockTransferService(
   ): Unit = {
     val thisExecId = blockManager.get.executorId
     if (execIds.length != 1 || execIds.exists(_ != thisExecId)) {
-      // all executors have the same host "local" DFS directory
-      val dir = Seq(conf.getAppId, conf.get(APP_ATTEMPT_ID.key, "null"))
-        .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
-        .getPath
-      logInfo(f"Getting hostLocalDirs for executor ids ${execIds.mkString(", ")}: $dir")
-      val map = execIds.map(execId => execId -> Array(dir)).toMap.asJava
-      hostLocalDirsCompletable.complete(map)
+      hostLocalDirsCompletable.complete(new util.HashMap())
     } else {
       super.getHostLocalDirs(host, port, execIds, hostLocalDirsCompletable)
     }
@@ -119,7 +118,7 @@ class DfsBlockTransferService(
     // TODO: all shuffle blocks are read from dfs atm, make this configurable
     // TODO: implement detecting / memorizing dead executors
     val stateListener = BlockIdStateListener(listener)
-    val executorIsAlive = blockIds.exists(!BlockId.apply(_).isShuffle)
+    val executorIsAlive = false
     val pendingBlockIds = if (executorIsAlive) {
       try {
         logInfo(
@@ -156,7 +155,45 @@ class DfsBlockTransferService(
     val subId = blockId.name.split("_")(1)
     val dfsPath = getDfsPath(subId)
     logInfo(f"Reading $blockId from dfs: $dfsPath")
-    Try(SparkEnv.get.blockManager.getHostLocalShuffleData(blockId, Array(dfsPath)))
+
+    Try {
+      val (shuffleId, mapId, startReduceId, endReduceId) = blockId match {
+        case id: ShuffleBlockId =>
+          (id.shuffleId, id.mapId, id.reduceId, id.reduceId + 1)
+        case batchId: ShuffleBlockBatchId =>
+          (batchId.shuffleId, batchId.mapId, batchId.startReduceId, batchId.endReduceId)
+        case _ =>
+          throw SparkException.internalError(
+            s"unexpected shuffle block id format: $blockId", category = "STORAGE")
+      }
+
+      val name = ShuffleIndexBlockId(shuffleId, mapId, NOOP_REDUCE_ID).name
+      val hash = JavaUtils.nonNegativeHash(name)
+      val indexFile = new Path(dfsPath, s"$appId/$shuffleId/$hash/$name")
+      val start = startReduceId * 8L
+      val end = endReduceId * 8L
+      Utils.tryWithResource(fileSystem.open(indexFile)) { inputStream =>
+        Utils.tryWithResource(new DataInputStream(inputStream)) { index =>
+          index.skip(start)
+          val offset = index.readLong()
+          index.skip(end - (start + 8L))
+          val nextOffset = index.readLong()
+          val name = ShuffleDataBlockId(shuffleId, mapId, NOOP_REDUCE_ID).name
+          val hash = JavaUtils.nonNegativeHash(name)
+          val dataFile = new Path(dfsPath, s"$appId/$shuffleId/$hash/$name")
+          val size = nextOffset - offset
+          logDebug(s"To byte array $size")
+          val array = new Array[Byte](size.toInt)
+          val startTimeNs = System.nanoTime()
+          Utils.tryWithResource(fileSystem.open(dataFile)) { f =>
+            f.seek(offset)
+            f.readFully(array)
+            logDebug(s"Took ${(System.nanoTime() - startTimeNs) / (1000 * 1000)}ms")
+          }
+          new NioManagedBuffer(ByteBuffer.wrap(array))
+        }
+      }
+    }
   }
 
   private def write(

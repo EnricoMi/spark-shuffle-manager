@@ -26,7 +26,7 @@ trait SparkTestSession {
       .builder()
       .master("local[16]")
       .appName("spark test example")
-      .config("spark.sql.shuffle.partitions", 2)
+      .config("spark.sql.shuffle.partitions", 24)
       .config("spark.sql.adaptive.enabled", false)
       .config("spark.local.dir", ".")
       .config("spark.shuffle.manager", "org.apache.spark.shuffle.DfsShuffleManager")

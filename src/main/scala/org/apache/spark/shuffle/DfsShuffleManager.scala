@@ -16,29 +16,33 @@
 
 package org.apache.spark.shuffle
 
+import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.APP_ATTEMPT_ID
+import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.shuffle.sort.SortShuffleManager
-import org.apache.spark.util.ThreadUtils
+import org.apache.spark.util.{ThreadUtils, Utils}
 import org.apache.spark.{ShuffleDependency, SparkConf, TaskContext}
 
-import java.io.File
-import java.nio.file.{Files, Path, StandardCopyOption}
 import java.util.concurrent.{Future, TimeUnit}
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService}
-import scala.reflect.io.Directory
 import scala.util.Try
 
 class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) with Logging {
   logInfo("DfsShuffleManager created")
 
+  private lazy val appId = conf.getAppId
   private val dfsPath = conf
     .getOption("spark.shuffle.dfs.path")
-    .map(new File(_))
+    .map(new Path(_))
     .getOrElse(
       throw new RuntimeException("DFS Shuffle Manager requires option spark.shuffle.dfs.path")
     )
+  private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
+  private val fileSystem = FileSystem.get(dfsPath.toUri, hadoopConf)
+
 
   private val syncThreadPool =
     ThreadUtils.newDaemonCachedThreadPool("dfs-shuffle-manager-sync-thread-pool", 16)
@@ -85,23 +89,29 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
   }
 
   private def getDestination(shuffleId: Int, parts: String*): Path = {
-    (Seq(conf.getAppId, conf.get(APP_ATTEMPT_ID.key, "null"), shuffleId.toString) ++ parts)
-      .foldLeft(dfsPath) { case (dir, part) => new File(dir, part) }
-      .toPath
+    val hash = JavaUtils.nonNegativeHash(parts.last)
+    (Seq(appId, conf.get(APP_ATTEMPT_ID.key, "null"), shuffleId.toString, hash.toString) ++ parts)
+      .foldLeft(dfsPath) { case (dir, part) => new Path(dir, part) }
   }
 
   def sync(handle: DfsShuffleHandle, mapId: Long): Unit = {
-    val dataFile = shuffleBlockResolver.getDataFile(handle.shuffleId, mapId).toPath
-    val indexFile = shuffleBlockResolver.getIndexFile(handle.shuffleId, mapId).toPath
-    Seq(dataFile, indexFile)
-      .map(path => SyncTask(path, getDestination(handle.shuffleId, path.getParent.toFile.getName, path.toFile.getName)))
-      .map(syncExecutionContext.submit)
-      .foreach(syncTasks+=(_))
+    val shuffleId = handle.shuffleId
+    val dataFile = shuffleBlockResolver.getDataFile(handle.shuffleId, mapId)
+    val indexFile = shuffleBlockResolver.getIndexFile(handle.shuffleId, mapId)
+
+    if (indexFile.exists()) {
+      Seq(dataFile, indexFile)
+        .filter(_.exists())
+        .map(path => new Path(Utils.resolveURI(path.getAbsolutePath)))
+        .map(path => SyncTask(path, getDestination(shuffleId, path.getParent.getName, path.getName), fileSystem))
+        .map(syncExecutionContext.submit)
+        .foreach(syncTasks+=(_))
+    }
   }
 
   private def removeDir(path: Path): Boolean = {
     logInfo(f"removing $path")
-    Try(() => new Directory(path.toFile).deleteRecursively()).recover { case t: Throwable =>
+    Try(() => fileSystem.delete(path, true)).recover { case t: Throwable =>
       logWarning(f"Failed to delete directory $path", t)
     }.isSuccess
   }
@@ -130,10 +140,10 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
   }
 }
 
-case class SyncTask(source: Path, destination: Path) extends Runnable with Logging {
+case class SyncTask(source: Path, destination: Path, fileSystem: FileSystem) extends Runnable with Logging {
   override def run(): Unit = {
     logInfo(s"copying $source to $destination")
-    destination.getParent.toFile.mkdirs()
-    Files.copy(source, destination, StandardCopyOption.COPY_ATTRIBUTES)
+    fileSystem.mkdirs(destination.getParent)
+    fileSystem.copyFromLocalFile(source, destination)
   }
 }
