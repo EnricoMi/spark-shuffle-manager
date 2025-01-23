@@ -30,7 +30,6 @@ trait SparkTestSession {
       .config("spark.sql.adaptive.enabled", false)
       .config("spark.local.dir", ".")
       .config("spark.shuffle.manager", "org.apache.spark.shuffle.DfsShuffleManager")
-      .config("spark.shuffle.blockTransferService", "org.apache.spark.shuffle.DfsBlockTransferService")
       .config("spark.shuffle.dfs.path", "/tmp/dfsss")
       .getOrCreate()
   }

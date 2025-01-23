@@ -14,58 +14,123 @@
  * limitations under the License.
  */
 
-package org.apache.spark.shuffle
+package org.apache.spark.network
 
+import com.codahale.metrics.MetricSet
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.APP_ATTEMPT_ID
-import org.apache.spark.network.BlockDataManager
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
-import org.apache.spark.network.netty.NettyBlockTransferService
-import org.apache.spark.network.shuffle.{BlockFetchingListener, DownloadFileManager}
+import org.apache.spark.network.shuffle.checksum.Cause
+import org.apache.spark.network.shuffle._
 import org.apache.spark.network.util.JavaUtils
-import org.apache.spark.rpc.RpcEndpointRef
-import org.apache.spark.serializer.SerializerManager
 import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
-import org.apache.spark.storage.{BlockId, BlockManager, ShuffleBlockBatchId, ShuffleBlockId, ShuffleDataBlockId, ShuffleIndexBlockId}
+import org.apache.spark.storage._
 import org.apache.spark.util.Utils
-import org.apache.spark.{SecurityManager, SparkConf, SparkException}
+import org.apache.spark.{SparkConf, SparkEnv, SparkException}
 
 import java.io.DataInputStream
 import java.nio.ByteBuffer
-import java.util
 import java.util.concurrent.CompletableFuture
 import scala.collection.mutable
+import scala.concurrent.Future
+import scala.reflect.ClassTag
 import scala.util.{Failure, Success, Try}
 
-class DfsBlockTransferService(
-    conf: SparkConf,
-    securityManager: SecurityManager,
-    serializerManager: SerializerManager,
-    bindAddress: String,
-    hostName: String,
-    port: Int,
-    numCores: Int,
-    driverEndPointRef: RpcEndpointRef = null
-) extends NettyBlockTransferService(
-      conf,
-      securityManager,
-      serializerManager,
-      bindAddress,
-      hostName,
-      port,
-      numCores,
-      driverEndPointRef
-    )
+class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransferService)
+    extends BlockTransferService
     with Logging {
 
-  var blockManager: Option[BlockManager] = None
+  appId = conf.getAppId
 
-  override def init(blockDataManager: BlockDataManager): Unit = {
-    super.init(blockDataManager)
-    blockManager = Some(blockDataManager.asInstanceOf[BlockManager])
-  }
+  override def init(blockDataManager: BlockDataManager): Unit = blockTransferService.init(blockDataManager)
+
+  override def port: Int = blockTransferService.port
+
+  override def hostName: String = blockTransferService.hostName
+
+  override def setAppAttemptId(appAttemptId: String): Unit = blockTransferService.setAppAttemptId(appAttemptId)
+
+  override def getAppAttemptId: String = blockTransferService.getAppAttemptId
+
+  override def uploadBlock(
+      hostname: String,
+      port: Int,
+      execId: String,
+      blockId: BlockId,
+      blockData: ManagedBuffer,
+      level: StorageLevel,
+      classTag: ClassTag[_]
+  ): Future[Unit] =
+    blockTransferService.uploadBlock(hostName, port, execId, blockId, blockData, level, classTag)
+
+  override def uploadBlockSync(
+      hostname: String,
+      port: Int,
+      execId: String,
+      blockId: BlockId,
+      blockData: ManagedBuffer,
+      level: StorageLevel,
+      classTag: ClassTag[_]
+  ): Unit =
+    blockTransferService.uploadBlockSync(hostname, port, execId, blockId, blockData, level, classTag)
+
+  override def pushBlocks(
+      host: String,
+      port: Int,
+      blockIds: Array[String],
+      buffers: Array[ManagedBuffer],
+      listener: BlockPushingListener
+  ): Unit =
+    blockTransferService.pushBlocks(host, port, blockIds, buffers, listener)
+
+  override def fetchBlockSync(
+      host: String,
+      port: Int,
+      execId: String,
+      blockId: String,
+      tempFileManager: DownloadFileManager
+  ): ManagedBuffer =
+    blockTransferService.fetchBlockSync(host, port, execId, blockId, tempFileManager)
+
+  override def finalizeShuffleMerge(
+      host: String,
+      port: Int,
+      shuffleId: Int,
+      shuffleMergeId: Int,
+      listener: MergeFinalizerListener
+  ): Unit =
+    blockTransferService.finalizeShuffleMerge(host, port, shuffleId, shuffleMergeId, listener)
+
+  override def getMergedBlockMeta(
+      host: String,
+      port: Int,
+      shuffleId: Int,
+      shuffleMergeId: Int,
+      reduceId: Int,
+      listener: MergedBlocksMetaListener
+  ): Unit =
+    blockTransferService.getMergedBlockMeta(host, port, shuffleId, shuffleMergeId, reduceId, listener)
+
+  override def removeShuffleMerge(host: String, port: Int, shuffleId: Int, shuffleMergeId: Int): Boolean =
+    blockTransferService.removeShuffleMerge(host, port, shuffleId, shuffleMergeId)
+
+  override def close(): Unit = blockTransferService.close()
+
+  override def shuffleMetrics(): MetricSet = blockTransferService.shuffleMetrics()
+
+  override def diagnoseCorruption(
+      host: String,
+      port: Int,
+      execId: String,
+      shuffleId: Int,
+      mapId: Long,
+      reduceId: Int,
+      checksum: Long,
+      algorithm: String
+  ): Cause =
+    blockTransferService.diagnoseCorruption(host, port, execId, shuffleId, mapId, reduceId, checksum, algorithm)
 
   private val dfsPath = conf
     .getOption("spark.shuffle.dfs.path")
@@ -76,9 +141,10 @@ class DfsBlockTransferService(
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
   private val fileSystem = FileSystem.get(dfsPath.toUri, hadoopConf)
 
-  private def getDfsPath(sub: String): Path =
-    Seq(appId, conf.get(APP_ATTEMPT_ID.key, "null"), sub)
+  private def getDfsPath(parts: String*): Path = {
+    (Seq(appId, conf.get(APP_ATTEMPT_ID.key, "null")) ++ parts)
       .foldLeft(dfsPath) { case (dir, part) => new Path(dir, part) }
+  }
 
   private case class BlockIdStateListener(delegate: BlockFetchingListener) extends BlockFetchingListener {
     val failedBlockIds: mutable.Buffer[String] = mutable.Buffer[String]()
@@ -97,13 +163,13 @@ class DfsBlockTransferService(
       host: String,
       port: Int,
       execIds: Array[String],
-      hostLocalDirsCompletable: CompletableFuture[util.Map[String, Array[String]]]
+      hostLocalDirsCompletable: CompletableFuture[java.util.Map[String, Array[String]]]
   ): Unit = {
-    val thisExecId = blockManager.get.executorId
+    val thisExecId = SparkEnv.get.executorId
     if (execIds.length != 1 || execIds.exists(_ != thisExecId)) {
-      hostLocalDirsCompletable.complete(new util.HashMap())
+      hostLocalDirsCompletable.complete(new java.util.HashMap())
     } else {
-      super.getHostLocalDirs(host, port, execIds, hostLocalDirsCompletable)
+      blockTransferService.getHostLocalDirs(host, port, execIds, hostLocalDirsCompletable)
     }
   }
 
@@ -124,9 +190,9 @@ class DfsBlockTransferService(
         logInfo(
           s"Fetching ${blockIds.length} blocks from executor $execId on $host:$port"
         )
-        // super.fetchBlocks calls listener.onBlockFetchFailure for failed blockIds,
+        // blockTransferService.fetchBlocks calls listener.onBlockFetchFailure for failed blockIds,
         // intercept this via stateListener
-        super.fetchBlocks(host, port, execId, blockIds, stateListener, tempFileManager)
+        blockTransferService.fetchBlocks(host, port, execId, blockIds, stateListener, tempFileManager)
         stateListener.failedBlockIds.toArray
       } catch {
         case _: Exception =>
@@ -152,9 +218,7 @@ class DfsBlockTransferService(
   }
 
   private def read(blockId: BlockId): Try[ManagedBuffer] = {
-    val subId = blockId.name.split("_")(1)
-    val dfsPath = getDfsPath(subId)
-    logInfo(f"Reading $blockId from dfs: $dfsPath")
+    logInfo(f"Reading $blockId from $dfsPath")
 
     Try {
       val (shuffleId, mapId, startReduceId, endReduceId) = blockId match {
@@ -163,13 +227,13 @@ class DfsBlockTransferService(
         case batchId: ShuffleBlockBatchId =>
           (batchId.shuffleId, batchId.mapId, batchId.startReduceId, batchId.endReduceId)
         case _ =>
-          throw SparkException.internalError(
-            s"unexpected shuffle block id format: $blockId", category = "STORAGE")
+          throw SparkException.internalError(s"unexpected shuffle block id format: $blockId", category = "STORAGE")
       }
 
       val name = ShuffleIndexBlockId(shuffleId, mapId, NOOP_REDUCE_ID).name
       val hash = JavaUtils.nonNegativeHash(name)
-      val indexFile = new Path(dfsPath, s"$appId/$shuffleId/$hash/$name")
+      val indexFile = getDfsPath(shuffleId.toString, hash.toString, name)
+      logInfo(s"Reading index file $indexFile")
       val start = startReduceId * 8L
       val end = endReduceId * 8L
       Utils.tryWithResource(fileSystem.open(indexFile)) { inputStream =>
@@ -180,7 +244,8 @@ class DfsBlockTransferService(
           val nextOffset = index.readLong()
           val name = ShuffleDataBlockId(shuffleId, mapId, NOOP_REDUCE_ID).name
           val hash = JavaUtils.nonNegativeHash(name)
-          val dataFile = new Path(dfsPath, s"$appId/$shuffleId/$hash/$name")
+          val dataFile = getDfsPath(shuffleId.toString, hash.toString, name)
+          logInfo(s"Reading data file $dataFile")
           val size = nextOffset - offset
           logDebug(s"To byte array $size")
           val array = new Array[Byte](size.toInt)
@@ -214,4 +279,5 @@ class DfsBlockTransferService(
       listener.onBlockFetchSuccess(blockId.name, buffer)
     }
   }
+
 }

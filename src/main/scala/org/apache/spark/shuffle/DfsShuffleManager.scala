@@ -19,11 +19,14 @@ package org.apache.spark.shuffle
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.APP_ATTEMPT_ID
+import org.apache.spark.internal.config.{APP_ATTEMPT_ID, DRIVER_BIND_ADDRESS, DRIVER_HOST_ADDRESS, DRIVER_PORT}
+import org.apache.spark.network.DfsBlockTransferService
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.shuffle.sort.SortShuffleManager
+import org.apache.spark.shuffle.sort.SortShuffleManager.canUseBatchFetch
+import org.apache.spark.storage.{BlockManager, DfsBlockManager}
 import org.apache.spark.util.{ThreadUtils, Utils}
-import org.apache.spark.{ShuffleDependency, SparkConf, TaskContext}
+import org.apache.spark.{ShuffleDependency, SparkConf, SparkContext, SparkEnv, TaskContext}
 
 import java.util.concurrent.{Future, TimeUnit}
 import scala.collection.mutable
@@ -42,7 +45,6 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
     )
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
   private val fileSystem = FileSystem.get(dfsPath.toUri, hadoopConf)
-
 
   private val syncThreadPool =
     ThreadUtils.newDaemonCachedThreadPool("dfs-shuffle-manager-sync-thread-pool", 16)
@@ -76,15 +78,40 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
       context: TaskContext,
       metrics: ShuffleReadMetricsReporter
   ): ShuffleReader[K, C] = {
-    logInfo("creating writer for shuffle " + handle)
-    super.getReader[K, C](
-      handle.asInstanceOf[DfsShuffleHandle].handle,
-      startMapIndex,
-      endMapIndex,
-      startPartition,
-      endPartition,
+    logInfo("creating reader for shuffle " + handle)
+    val baseShuffleHandle = handle.asInstanceOf[DfsShuffleHandle].handle.asInstanceOf[BaseShuffleHandle[K, _, C]]
+    val (blocksByAddress, canEnableBatchFetch) =
+      if (baseShuffleHandle.dependency.isShuffleMergeFinalizedMarked) {
+        val res = SparkEnv.get.mapOutputTracker.getPushBasedShuffleMapSizesByExecutorId(
+          handle.shuffleId,
+          startMapIndex,
+          endMapIndex,
+          startPartition,
+          endPartition
+        )
+        (res.iter, res.enableBatchFetch)
+      } else {
+        val address = SparkEnv.get.mapOutputTracker.getMapSizesByExecutorId(
+          handle.shuffleId,
+          startMapIndex,
+          endMapIndex,
+          startPartition,
+          endPartition
+        )
+        (address, true)
+      }
+
+    val dfsBlockTransferService = new DfsBlockTransferService(conf, SparkEnv.get.blockManager.blockTransferService)
+    val dfsBlockManager = new DfsBlockManager(SparkEnv.get.blockManager, dfsBlockTransferService)
+    assert(dfsBlockManager.blockTransferService.isInstanceOf[DfsBlockTransferService])
+    assert(dfsBlockManager.blockStoreClient.isInstanceOf[DfsBlockTransferService])
+    new BlockStoreShuffleReader(
+      baseShuffleHandle,
+      blocksByAddress,
       context,
-      metrics
+      metrics,
+      blockManager = dfsBlockManager,
+      shouldBatchFetch = canEnableBatchFetch && canUseBatchFetch(startPartition, endPartition, context)
     )
   }
 
@@ -103,9 +130,9 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
       Seq(dataFile, indexFile)
         .filter(_.exists())
         .map(path => new Path(Utils.resolveURI(path.getAbsolutePath)))
-        .map(path => SyncTask(path, getDestination(shuffleId, path.getParent.getName, path.getName), fileSystem))
+        .map(path => SyncTask(path, getDestination(shuffleId, path.getName), fileSystem))
         .map(syncExecutionContext.submit)
-        .foreach(syncTasks+=(_))
+        .foreach(syncTasks += (_))
     }
   }
 
