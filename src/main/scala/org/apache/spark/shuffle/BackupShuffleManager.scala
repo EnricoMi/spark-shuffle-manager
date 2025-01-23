@@ -20,11 +20,11 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.{APP_ATTEMPT_ID, DRIVER_BIND_ADDRESS, DRIVER_HOST_ADDRESS, DRIVER_PORT}
-import org.apache.spark.network.DfsBlockTransferService
+import org.apache.spark.network.BackupBlockTransferService
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.shuffle.sort.SortShuffleManager.canUseBatchFetch
-import org.apache.spark.storage.{BlockManager, DfsBlockManager}
+import org.apache.spark.storage.{BlockManager, BackupBlockManager}
 import org.apache.spark.util.{ThreadUtils, Utils}
 import org.apache.spark.{ShuffleDependency, SparkConf, SparkContext, SparkEnv, TaskContext}
 
@@ -33,21 +33,21 @@ import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService}
 import scala.util.Try
 
-class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) with Logging {
-  logInfo("DfsShuffleManager created")
+class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) with Logging {
+  logInfo("BackupShuffleManager created")
 
   private lazy val appId = conf.getAppId
-  private val dfsPath = conf
-    .getOption("spark.shuffle.dfs.path")
+  private val backupPath = conf
+    .getOption("spark.shuffle.backup.path")
     .map(new Path(_))
     .getOrElse(
-      throw new RuntimeException("DFS Shuffle Manager requires option spark.shuffle.dfs.path")
+      throw new RuntimeException("BackupShuffleManager requires option spark.shuffle.backup.path")
     )
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
-  private val fileSystem = FileSystem.get(dfsPath.toUri, hadoopConf)
+  private val fileSystem = FileSystem.get(backupPath.toUri, hadoopConf)
 
   private val syncThreadPool =
-    ThreadUtils.newDaemonCachedThreadPool("dfs-shuffle-manager-sync-thread-pool", 16)
+    ThreadUtils.newDaemonCachedThreadPool("backup-shuffle-manager-sync-thread-pool", 16)
   private implicit val syncExecutionContext: ExecutionContextExecutorService =
     ExecutionContext.fromExecutorService(syncThreadPool)
   private val syncTasks: mutable.Buffer[Future[_]] = mutable.Buffer()
@@ -55,7 +55,7 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
   override def registerShuffle[K, V, C](shuffleId: Int, dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
     logInfo("registering shuffle id " + shuffleId)
     val handle = super.registerShuffle(shuffleId, dependency)
-    new DfsShuffleHandle(shuffleId, dependency.partitioner, handle)
+    new BackupShuffleHandle(shuffleId, dependency.partitioner, handle)
   }
 
   override def getWriter[K, V](
@@ -65,8 +65,8 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
       metrics: ShuffleWriteMetricsReporter
   ): ShuffleWriter[K, V] = {
     logInfo("creating writer for shuffle " + handle)
-    val writer = super.getWriter[K, V](handle.asInstanceOf[DfsShuffleHandle].handle, mapId, context, metrics)
-    new DfsShuffleWriter[K, V](handle.asInstanceOf[DfsShuffleHandle], writer, mapId, this)
+    val writer = super.getWriter[K, V](handle.asInstanceOf[BackupShuffleHandle].handle, mapId, context, metrics)
+    new BackupShuffleWriter[K, V](handle.asInstanceOf[BackupShuffleHandle], writer, mapId, this)
   }
 
   override def getReader[K, C](
@@ -79,7 +79,7 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
       metrics: ShuffleReadMetricsReporter
   ): ShuffleReader[K, C] = {
     logInfo("creating reader for shuffle " + handle)
-    val baseShuffleHandle = handle.asInstanceOf[DfsShuffleHandle].handle.asInstanceOf[BaseShuffleHandle[K, _, C]]
+    val baseShuffleHandle = handle.asInstanceOf[BackupShuffleHandle].handle.asInstanceOf[BaseShuffleHandle[K, _, C]]
     val (blocksByAddress, canEnableBatchFetch) =
       if (baseShuffleHandle.dependency.isShuffleMergeFinalizedMarked) {
         val res = SparkEnv.get.mapOutputTracker.getPushBasedShuffleMapSizesByExecutorId(
@@ -101,16 +101,17 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
         (address, true)
       }
 
-    val dfsBlockTransferService = new DfsBlockTransferService(conf, SparkEnv.get.blockManager.blockTransferService)
-    val dfsBlockManager = new DfsBlockManager(SparkEnv.get.blockManager, dfsBlockTransferService)
-    assert(dfsBlockManager.blockTransferService.isInstanceOf[DfsBlockTransferService])
-    assert(dfsBlockManager.blockStoreClient.isInstanceOf[DfsBlockTransferService])
+    val backupBlockTransferService =
+      new BackupBlockTransferService(conf, SparkEnv.get.blockManager.blockTransferService)
+    val backupBlockManager = new BackupBlockManager(SparkEnv.get.blockManager, backupBlockTransferService)
+    assert(backupBlockManager.blockTransferService.isInstanceOf[BackupBlockTransferService])
+    assert(backupBlockManager.blockStoreClient.isInstanceOf[BackupBlockTransferService])
     new BlockStoreShuffleReader(
       baseShuffleHandle,
       blocksByAddress,
       context,
       metrics,
-      blockManager = dfsBlockManager,
+      blockManager = backupBlockManager,
       shouldBatchFetch = canEnableBatchFetch && canUseBatchFetch(startPartition, endPartition, context)
     )
   }
@@ -118,10 +119,10 @@ class DfsShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf) wi
   private def getDestination(shuffleId: Int, parts: String*): Path = {
     val hash = JavaUtils.nonNegativeHash(parts.last)
     (Seq(appId, conf.get(APP_ATTEMPT_ID.key, "null"), shuffleId.toString, hash.toString) ++ parts)
-      .foldLeft(dfsPath) { case (dir, part) => new Path(dir, part) }
+      .foldLeft(backupPath) { case (dir, part) => new Path(dir, part) }
   }
 
-  def sync(handle: DfsShuffleHandle, mapId: Long): Unit = {
+  def sync(handle: BackupShuffleHandle, mapId: Long): Unit = {
     val shuffleId = handle.shuffleId
     val dataFile = shuffleBlockResolver.getDataFile(handle.shuffleId, mapId)
     val indexFile = shuffleBlockResolver.getIndexFile(handle.shuffleId, mapId)

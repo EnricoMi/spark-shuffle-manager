@@ -1,11 +1,10 @@
-
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.gresearch.spark</groupId>
-  <artifactId>spark-dfsss_2.12</artifactId>
+  <artifactId>spark-backup-shuffle-manager_2.12</artifactId>
   <version>1.0.0-SNAPSHOT</version>
-  <name>Spark DFS Shuffle Service</name>
-  <description>A DFS-backed shuffle service for Apache Spark.</description>
+  <name>Spark Backup Shuffle Manager</name>
+  <description>A shuffle manager that backups shuffle data to a remote filesystem for Apache Spark.</description>
   <inceptionYear>2024</inceptionYear>
   <url>https://github.com/G-Research</url>
   <licenses>
@@ -16,10 +15,10 @@
     </license>
   </licenses>
   <scm>
-    <connection>scm:git:git://github.com/g-research/spark-dfsss.git</connection>
-    <developerConnection>scm:git:ssh://github.com:g-research/spark-dfsss.git</developerConnection>
-    <url>https://github.com/g-research/spark-dfsss/tree/${project.scm.tag}</url>
-    <tag>master</tag>
+    <connection>scm:git:git://github.com/g-research/spark-backup-shuffle-manager.git</connection>
+    <developerConnection>scm:git:ssh://github.com:g-research/spark-backup-shuffle-manager.git</developerConnection>
+    <url>https://github.com/g-research/spark-backup-shuffle-manager/tree/${project.scm.tag}</url>
+    <tag>main</tag>
   </scm>
   <developers>
     <developer>
@@ -30,7 +29,7 @@
   </developers>
   <issueManagement>
     <system>GitHub Issues</system>
-    <url>https://github.com/G-Research/spark-dfsss/issues</url>
+    <url>https://github.com/G-Research/spark-backup-shuffle-manager/issues</url>
   </issueManagement>
 
   <properties>
@@ -192,7 +191,7 @@
               <goal>write-project-properties</goal>
             </goals>
             <configuration>
-              <outputFile>${project.build.outputDirectory}/spark-dfsss-build.properties</outputFile>
+              <outputFile>${project.build.outputDirectory}/spark-backup-shuffle-manager-build.properties</outputFile>
             </configuration>
           </execution>
         </executions>

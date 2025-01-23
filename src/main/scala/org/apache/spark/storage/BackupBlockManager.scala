@@ -30,7 +30,7 @@ import org.apache.spark.util.io.ChunkedByteBuffer
 import java.io.File
 import scala.reflect.ClassTag
 
-class DfsBlockManager(blockManager: BlockManager, blockTransferService: BlockTransferService)
+class BackupBlockManager(blockManager: BlockManager, blockTransferService: BlockTransferService)
     extends BlockManager(
       blockManager.executorId,
       SparkEnv.get.rpcEnv,

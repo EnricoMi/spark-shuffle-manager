@@ -16,9 +16,11 @@
 
 package org.apache.spark.shuffle
 
-import org.apache.spark.shuffle.sort.io.LocalDiskShuffleDriverComponents
+import org.apache.spark.SparkConf
+import org.apache.spark.shuffle.api.{ShuffleDataIO, ShuffleDriverComponents, ShuffleExecutorComponents}
+import org.apache.spark.shuffle.sort.io.LocalDiskShuffleExecutorComponents
 
-class DfsShuffleDriverComponents extends LocalDiskShuffleDriverComponents {
-  // TODO: implement shuffle and app cleanup
-  override val supportsReliableStorage: Boolean = true
+class BackupShuffleDataIO(conf: SparkConf) extends ShuffleDataIO {
+  override def executor(): ShuffleExecutorComponents = new LocalDiskShuffleExecutorComponents(conf)
+  override def driver(): ShuffleDriverComponents = new BackupShuffleDriverComponents()
 }

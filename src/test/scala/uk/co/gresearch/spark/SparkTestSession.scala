@@ -25,12 +25,12 @@ trait SparkTestSession {
     SparkSession
       .builder()
       .master("local[16]")
-      .appName("spark test example")
+      .appName("Spark Tests")
       .config("spark.sql.shuffle.partitions", 24)
       .config("spark.sql.adaptive.enabled", false)
       .config("spark.local.dir", ".")
-      .config("spark.shuffle.manager", "org.apache.spark.shuffle.DfsShuffleManager")
-      .config("spark.shuffle.dfs.path", "/tmp/dfsss")
+      .config("spark.shuffle.manager", "org.apache.spark.shuffle.BackupShuffleManager")
+      .config("spark.shuffle.backup.path", "/tmp/spark-backup-shuffle-service")
       .getOrCreate()
   }
 

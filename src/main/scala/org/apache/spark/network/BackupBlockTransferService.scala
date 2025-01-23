@@ -38,7 +38,7 @@ import scala.concurrent.Future
 import scala.reflect.ClassTag
 import scala.util.{Failure, Success, Try}
 
-class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransferService)
+class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTransferService)
     extends BlockTransferService
     with Logging {
 
@@ -132,19 +132,18 @@ class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransf
   ): Cause =
     blockTransferService.diagnoseCorruption(host, port, execId, shuffleId, mapId, reduceId, checksum, algorithm)
 
-  private val dfsPath = conf
-    .getOption("spark.shuffle.dfs.path")
+  private val backupPath = conf
+    .getOption("spark.shuffle.backup.path")
     .map(new Path(_))
     .getOrElse(
-      throw new RuntimeException("DFS Shuffle Manager requires option spark.shuffle.dfs.path")
+      throw new RuntimeException("BackupShuffleManager requires option spark.shuffle.backup.path")
     )
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
-  private val fileSystem = FileSystem.get(dfsPath.toUri, hadoopConf)
+  private val fileSystem = FileSystem.get(backupPath.toUri, hadoopConf)
 
-  private def getDfsPath(parts: String*): Path = {
+  private def getBackupPath(parts: String*): Path =
     (Seq(appId, conf.get(APP_ATTEMPT_ID.key, "null")) ++ parts)
-      .foldLeft(dfsPath) { case (dir, part) => new Path(dir, part) }
-  }
+      .foldLeft(backupPath) { case (dir, part) => new Path(dir, part) }
 
   private case class BlockIdStateListener(delegate: BlockFetchingListener) extends BlockFetchingListener {
     val failedBlockIds: mutable.Buffer[String] = mutable.Buffer[String]()
@@ -181,7 +180,7 @@ class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransf
       listener: BlockFetchingListener,
       tempFileManager: DownloadFileManager
   ): Unit = {
-    // TODO: all shuffle blocks are read from dfs atm, make this configurable
+    // TODO: all shuffle blocks are read from backup atm, make this configurable
     // TODO: implement detecting / memorizing dead executors
     val stateListener = BlockIdStateListener(listener)
     val executorIsAlive = false
@@ -204,9 +203,9 @@ class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransf
       blockIds
     }
 
-    // fetch only the pending block ids from dfs
+    // fetch only the pending block ids from backup
     if (pendingBlockIds.nonEmpty) {
-      logInfo(s"Fetching ${pendingBlockIds.length} blocks from dfs")
+      logInfo(s"Fetching ${pendingBlockIds.length} blocks from backup")
 
       pendingBlockIds
         .map(BlockId.apply)
@@ -219,7 +218,7 @@ class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransf
   }
 
   private def read(blockId: BlockId): Try[ManagedBuffer] = {
-    logInfo(f"Reading $blockId from $dfsPath")
+    logInfo(f"Reading $blockId from backup: $backupPath")
 
     Try {
       val (shuffleId, mapId, startReduceId, endReduceId) = blockId match {
@@ -233,7 +232,7 @@ class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransf
 
       val name = ShuffleIndexBlockId(shuffleId, mapId, NOOP_REDUCE_ID).name
       val hash = JavaUtils.nonNegativeHash(name)
-      val indexFile = getDfsPath(shuffleId.toString, hash.toString, name)
+      val indexFile = getBackupPath(shuffleId.toString, hash.toString, name)
       logInfo(s"Reading index file $indexFile")
       val start = startReduceId * 8L
       val end = endReduceId * 8L
@@ -245,7 +244,7 @@ class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransf
           val nextOffset = index.readLong()
           val name = ShuffleDataBlockId(shuffleId, mapId, NOOP_REDUCE_ID).name
           val hash = JavaUtils.nonNegativeHash(name)
-          val dataFile = getDfsPath(shuffleId.toString, hash.toString, name)
+          val dataFile = getBackupPath(shuffleId.toString, hash.toString, name)
           logInfo(s"Reading data file $dataFile")
           val size = nextOffset - offset
           logDebug(s"To byte array $size")

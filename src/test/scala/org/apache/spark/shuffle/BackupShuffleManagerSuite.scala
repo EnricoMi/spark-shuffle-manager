@@ -16,9 +16,19 @@
 
 package org.apache.spark.shuffle
 
-import org.apache.spark.Partitioner
+import org.scalatest.funsuite.AnyFunSuite
+import uk.co.gresearch.spark.SparkTestSession
 
-class DfsShuffleHandle(shuffleId: Int, val partitioner: Partitioner, val handle: ShuffleHandle)
-    extends ShuffleHandle(shuffleId) {
-  override def toString: String = { String.valueOf(shuffleId) }
+class BackupShuffleManagerSuite extends AnyFunSuite with SparkTestSession {
+  test("dataset") {
+    import spark.implicits._
+    spark
+      .range(1, 100, 1, 10)
+      .groupBy($"id" % 7)
+      .count()
+      .groupBy($"count")
+      .count()
+      .show(false)
+    spark.range(1, 100).show()
+  }
 }

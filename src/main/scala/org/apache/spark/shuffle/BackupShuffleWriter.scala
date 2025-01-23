@@ -18,11 +18,11 @@ package org.apache.spark.shuffle
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.MapStatus
 
-class DfsShuffleWriter[K, V](
-    val handle: DfsShuffleHandle,
+class BackupShuffleWriter[K, V](
+    val handle: BackupShuffleHandle,
     writer: ShuffleWriter[K, V],
     mapId: Long,
-    manager: DfsShuffleManager
+    manager: BackupShuffleManager
 ) extends ShuffleWriter[K, V]
     with Logging {
 
