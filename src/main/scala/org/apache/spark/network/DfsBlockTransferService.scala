@@ -185,6 +185,7 @@ class DfsBlockTransferService(conf: SparkConf, blockTransferService: BlockTransf
     // TODO: implement detecting / memorizing dead executors
     val stateListener = BlockIdStateListener(listener)
     val executorIsAlive = false
+    // TODO: what if non-shuffle blocks exist? blockIds.exists(!BlockId.apply(_).isShuffle)
     val pendingBlockIds = if (executorIsAlive) {
       try {
         logInfo(
