@@ -116,9 +116,9 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
     )
   }
 
-  private def getDestination(shuffleId: Int, parts: String*): Path = {
-    val hash = JavaUtils.nonNegativeHash(parts.last)
-    (Seq(appId, conf.get(APP_ATTEMPT_ID.key, "null"), shuffleId.toString, hash.toString) ++ parts)
+  private[spark] def getDestination(shuffleId: Int, parts: String*): Path = {
+    val hash = if (parts.nonEmpty) Seq(JavaUtils.nonNegativeHash(parts.last).toString) else Seq.empty
+    (Seq(appId, conf.get(APP_ATTEMPT_ID.key, "null"), shuffleId.toString) ++ hash ++ parts)
       .foldLeft(backupPath) { case (dir, part) => new Path(dir, part) }
   }
 

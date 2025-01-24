@@ -28,6 +28,16 @@ import java.io.FileNotFoundException
 import java.nio.file.Files
 
 class BackupShuffleManagerSuite extends AnyFunSuite with SparkTestSession {
+  test("getDestination") {
+    val conf = new SparkConf()
+      .set("spark.app.id", "spark-123456")
+      .set("spark.shuffle.backup.path", "/backup")
+    val manager = new BackupShuffleManager(conf)
+    assert(manager.getDestination(0) === new Path("/backup/spark-123456/null/0"))
+    assert(manager.getDestination(1, "file") === new Path("/backup/spark-123456/null/1/3143036/file"))
+    assert(manager.getDestination(2, "dir", "file") === new Path("/backup/spark-123456/null/2/3143036/dir/file"))
+  }
+
   Seq(0, 1000, 3000, 6000).foreach { replicationMs =>
     test(s"Consider replication delay - ${replicationMs}ms") {
       val dir = Files.createTempDirectory("BackupShuffleManagerSuite")
