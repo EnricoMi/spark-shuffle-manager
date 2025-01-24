@@ -23,6 +23,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.{APP_ATTEMPT_ID, ConfigBuilder}
 import org.apache.spark.network.BackupBlockTransferService.{
   BACKUP_PATH,
+  BACKUP_READ_ALWAYS,
   BACKUP_REPLICATION_DELAY,
   BACKUP_REPLICATION_WAIT,
   RetryingReader
@@ -143,6 +144,7 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
     .get(BACKUP_PATH)
     .map(new Path(_))
     .getOrElse(throw new RuntimeException("BackupShuffleManager requires option spark.shuffle.backup.path"))
+  private val readAlways = conf.get(BACKUP_READ_ALWAYS)
   private val reader = RetryingReader(conf)
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
   private val fileSystem = FileSystem.get(backupPath.toUri, hadoopConf)
@@ -186,25 +188,22 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
       listener: BlockFetchingListener,
       tempFileManager: DownloadFileManager
   ): Unit = {
-    // TODO: all shuffle blocks are read from backup atm, make this configurable
-    // TODO: implement detecting / memorizing dead executors
     val stateListener = BlockIdStateListener(listener)
-    val executorIsAlive = false
+    // TODO: implement detecting / memorizing dead executors
+    val executorIsAlive = true
     // TODO: what if non-shuffle blocks exist? blockIds.exists(!BlockId.apply(_).isShuffle)
-    val pendingBlockIds = if (executorIsAlive) {
+    val pendingBlockIds = if (executorIsAlive && !readAlways) {
       try {
-        logInfo(
-          s"Fetching ${blockIds.length} blocks from executor $execId on $host:$port"
-        )
+        logInfo(s"Fetching ${blockIds.length} blocks from executor $execId on $host:$port")
         // blockTransferService.fetchBlocks calls listener.onBlockFetchFailure for failed blockIds,
         // intercept this via stateListener
         blockTransferService.fetchBlocks(host, port, execId, blockIds, stateListener, tempFileManager)
-        stateListener.failedBlockIds.toArray
       } catch {
-        case _: Exception =>
-          // TODO: mark executor as dead
-          stateListener.failedBlockIds.toArray
+        case e: Exception =>
+          logInfo(s"Reading from executor $execId failed", e)
+        // TODO: mark executor as dead
       }
+      stateListener.failedBlockIds.toArray
     } else {
       blockIds
     }
@@ -315,6 +314,12 @@ object BackupBlockTransferService {
       .timeConf(TimeUnit.SECONDS)
       .checkValue(_ > 0, "Value must be positive.")
       .createWithDefaultString("1s")
+
+  private[spark] val BACKUP_READ_ALWAYS =
+    ConfigBuilder("spark.shuffle.backup.read.always")
+      .doc("When true, executor always read from the backup path, rather than from alive executors.")
+      .booleanConf
+      .createWithDefault(false)
 
   private[spark] case class RetryingReader(conf: SparkConf) extends Logging {
     private val replicationDelay: Option[Long] = conf.get(BACKUP_REPLICATION_DELAY)
