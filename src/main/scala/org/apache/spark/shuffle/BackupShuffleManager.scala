@@ -19,14 +19,14 @@ package org.apache.spark.shuffle
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.{APP_ATTEMPT_ID, DRIVER_BIND_ADDRESS, DRIVER_HOST_ADDRESS, DRIVER_PORT}
+import org.apache.spark.internal.config.APP_ATTEMPT_ID
 import org.apache.spark.network.BackupBlockTransferService
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.shuffle.sort.SortShuffleManager.canUseBatchFetch
-import org.apache.spark.storage.{BlockManager, BackupBlockManager}
+import org.apache.spark.storage.BackupBlockManager
 import org.apache.spark.util.{ThreadUtils, Utils}
-import org.apache.spark.{ShuffleDependency, SparkConf, SparkContext, SparkEnv, TaskContext}
+import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
 
 import java.util.concurrent.{Future, TimeUnit}
 import scala.collection.mutable

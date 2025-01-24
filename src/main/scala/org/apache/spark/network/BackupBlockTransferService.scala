@@ -17,22 +17,29 @@
 package org.apache.spark.network
 
 import com.codahale.metrics.MetricSet
-import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.hadoop.fs.{FSDataInputStream, FileSystem, Path}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.APP_ATTEMPT_ID
+import org.apache.spark.internal.config.{APP_ATTEMPT_ID, ConfigBuilder}
+import org.apache.spark.network.BackupBlockTransferService.{
+  BACKUP_PATH,
+  BACKUP_REPLICATION_DELAY,
+  BACKUP_REPLICATION_WAIT,
+  RetryingReader
+}
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.shuffle.checksum.Cause
 import org.apache.spark.network.shuffle._
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
 import org.apache.spark.storage._
-import org.apache.spark.util.Utils
+import org.apache.spark.util.{Clock, SystemClock, Utils}
 import org.apache.spark.{SparkConf, SparkEnv, SparkException}
 
-import java.io.DataInputStream
+import java.io.{DataInputStream, FileNotFoundException}
 import java.nio.ByteBuffer
-import java.util.concurrent.CompletableFuture
+import java.util.concurrent.{CompletableFuture, TimeUnit}
+import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.concurrent.Future
 import scala.reflect.ClassTag
@@ -133,11 +140,10 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
     blockTransferService.diagnoseCorruption(host, port, execId, shuffleId, mapId, reduceId, checksum, algorithm)
 
   private val backupPath = conf
-    .getOption("spark.shuffle.backup.path")
+    .get(BACKUP_PATH)
     .map(new Path(_))
-    .getOrElse(
-      throw new RuntimeException("BackupShuffleManager requires option spark.shuffle.backup.path")
-    )
+    .getOrElse(throw new RuntimeException("BackupShuffleManager requires option spark.shuffle.backup.path"))
+  private val reader = RetryingReader(conf)
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
   private val fileSystem = FileSystem.get(backupPath.toUri, hadoopConf)
 
@@ -236,7 +242,7 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
       logInfo(s"Reading index file $indexFile")
       val start = startReduceId * 8L
       val end = endReduceId * 8L
-      Utils.tryWithResource(fileSystem.open(indexFile)) { inputStream =>
+      Utils.tryWithResource(reader.open(fileSystem, indexFile)) { inputStream =>
         Utils.tryWithResource(new DataInputStream(inputStream)) { index =>
           index.skip(start)
           val offset = index.readLong()
@@ -250,7 +256,7 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
           logDebug(s"To byte array $size")
           val array = new Array[Byte](size.toInt)
           val startTimeNs = System.nanoTime()
-          Utils.tryWithResource(fileSystem.open(dataFile)) { f =>
+          Utils.tryWithResource(reader.open(fileSystem, dataFile)) { f =>
             f.seek(offset)
             f.readFully(array)
             logDebug(s"Took ${(System.nanoTime() - startTimeNs) / (1000 * 1000)}ms")
@@ -279,5 +285,88 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
       listener.onBlockFetchSuccess(blockId.name, buffer)
     }
   }
+}
 
+object BackupBlockTransferService {
+  private[spark] val BACKUP_PATH =
+    ConfigBuilder("spark.shuffle.backup.path")
+      .doc("A path to backup shuffle data.")
+      .stringConf
+      .checkValue(_.nonEmpty, "Path must not be empty")
+      .createOptional
+
+  private[spark] val BACKUP_REPLICATION_DELAY =
+    ConfigBuilder("spark.shuffle.backup.replication.delay")
+      .doc(
+        "The maximum expected delay for files written by one executor to become " +
+          "available to other executors."
+      )
+      .timeConf(TimeUnit.SECONDS)
+      .checkValue(_ > 0, "Value must be positive.")
+      .createOptional
+
+  private[spark] val BACKUP_REPLICATION_WAIT =
+    ConfigBuilder("spark.shuffle.backup.replication.wait")
+      .doc(
+        "When an executor cannot find a file in the fallback storage it waits " +
+          "this amount of time before attempting to open the file again, " +
+          f"while not exceeding ${BACKUP_REPLICATION_DELAY.key}."
+      )
+      .timeConf(TimeUnit.SECONDS)
+      .checkValue(_ > 0, "Value must be positive.")
+      .createWithDefaultString("1s")
+
+  private[spark] case class RetryingReader(conf: SparkConf) extends Logging {
+    private val replicationDelay: Option[Long] = conf.get(BACKUP_REPLICATION_DELAY)
+    private val replicationWait: Long = conf.get(BACKUP_REPLICATION_WAIT)
+
+    /**
+     * Open the file and retry FileNotFoundExceptions according to BACKUP_REPLICATION_DELAY and BACKUP_REPLICATION_WAIT
+     */
+    private[spark] def open(filesystem: FileSystem, path: Path, clock: Clock = new SystemClock()): FSDataInputStream = {
+      if (replicationDelay.isDefined) {
+        val replicationDeadline = clock.getTimeMillis() + replicationDelay.get * 1000
+        val replicationWaitMs = replicationWait * 1000
+        try {
+          open(filesystem, path, replicationDeadline, replicationWaitMs, clock)
+        } catch {
+          case fnf: FileNotFoundException =>
+            logInfo(
+              f"File not found, exceeded expected replication delay " +
+                f"of ${replicationDelay.get}s: $path"
+            )
+            throw fnf
+        }
+      } else {
+        filesystem.open(path)
+      }
+    }
+
+    /**
+     * Open the file, retry a FileNotFoundException for waitMs milliseconds, unless this would exceed the deadline. In
+     * the latter case, rethrow the exception.
+     */
+    @tailrec
+    private def open(
+        filesystem: FileSystem,
+        path: Path,
+        deadlineMs: Long,
+        waitMs: Long,
+        clock: Clock
+    ): FSDataInputStream = {
+      try {
+        filesystem.open(path)
+      } catch {
+        case fnf: FileNotFoundException =>
+          val waitTillMs = clock.getTimeMillis() + waitMs
+          if (waitTillMs <= deadlineMs) {
+            logInfo(f"File not found, waiting ${waitMs / 1000}s: $path")
+            clock.waitTillTime(waitTillMs)
+            open(filesystem, path, deadlineMs, waitMs, clock)
+          } else {
+            throw fnf
+          }
+      }
+    }
+  }
 }
