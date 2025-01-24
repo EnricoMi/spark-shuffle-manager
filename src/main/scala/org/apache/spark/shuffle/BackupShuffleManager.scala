@@ -19,14 +19,14 @@ package org.apache.spark.shuffle
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.APP_ATTEMPT_ID
+import org.apache.spark.internal.config.{APP_ATTEMPT_ID, EXECUTOR_ID}
 import org.apache.spark.network.BackupBlockTransferService
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.shuffle.sort.SortShuffleManager.canUseBatchFetch
 import org.apache.spark.storage.BackupBlockManager
 import org.apache.spark.util.{ThreadUtils, Utils}
-import org.apache.spark.{ShuffleDependency, SparkConf, SparkEnv, TaskContext}
+import org.apache.spark.{ShuffleDependency, SparkConf, SparkContext, SparkEnv, TaskContext}
 
 import java.util.concurrent.{Future, TimeUnit}
 import scala.collection.mutable
@@ -45,6 +45,17 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
     )
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
   private val fileSystem = FileSystem.get(backupPath.toUri, hadoopConf)
+
+  // fail-fast on driver if this path cannot be accessed / written to
+  if (conf.get(EXECUTOR_ID).exists(_.equals(SparkContext.DRIVER_IDENTIFIER))) {
+    try {
+      if (!fileSystem.exists(backupPath)) {
+        fileSystem.mkdirs(backupPath)
+      }
+    } catch {
+      case e: Exception => throw new RuntimeException(s"Cannot access backup path $backupPath", e)
+    }
+  }
 
   private val syncThreadPool =
     ThreadUtils.newDaemonCachedThreadPool("backup-shuffle-manager-sync-thread-pool", 16)
