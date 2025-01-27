@@ -21,13 +21,7 @@ import org.apache.hadoop.fs.{FSDataInputStream, FileSystem, Path}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.{APP_ATTEMPT_ID, ConfigBuilder}
-import org.apache.spark.network.BackupBlockTransferService.{
-  BACKUP_PATH,
-  BACKUP_READ_ALWAYS,
-  BACKUP_REPLICATION_DELAY,
-  BACKUP_REPLICATION_WAIT,
-  RetryingReader
-}
+import org.apache.spark.network.BackupBlockTransferService.{BACKUP_PATH, BACKUP_READ_ALWAYS, RetryingReader}
 import org.apache.spark.network.buffer.{ManagedBuffer, NioManagedBuffer}
 import org.apache.spark.network.shuffle.checksum.Cause
 import org.apache.spark.network.shuffle._
@@ -35,7 +29,7 @@ import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.shuffle.IndexShuffleBlockResolver.NOOP_REDUCE_ID
 import org.apache.spark.storage._
 import org.apache.spark.util.{Clock, SystemClock, Utils}
-import org.apache.spark.{SparkConf, SparkEnv, SparkException}
+import org.apache.spark.{ExecutorDeadException, SparkConf, SparkEnv, SparkException}
 
 import java.io.{DataInputStream, FileNotFoundException}
 import java.nio.ByteBuffer
@@ -51,6 +45,8 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
     with Logging {
 
   appId = conf.getAppId
+
+  private val deadExecutors = mutable.Set.empty[String]
 
   override def init(blockDataManager: BlockDataManager): Unit = blockTransferService.init(blockDataManager)
 
@@ -155,15 +151,19 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
 
   private case class BlockIdStateListener(delegate: BlockFetchingListener) extends BlockFetchingListener {
     val failedBlockIds: mutable.Buffer[String] = mutable.Buffer[String]()
+    private var _executorIsDead: Boolean = false
 
     override def onBlockFetchSuccess(blockId: String, data: ManagedBuffer): Unit = {
       delegate.onBlockFetchSuccess(blockId, data)
     }
 
     override def onBlockFetchFailure(blockId: String, exception: Throwable): Unit = {
-      logWarning(f"Failed to read block id $blockId", exception)
+      logInfo(f"Failed to read block id $blockId: ${exception.getMessage}")
       failedBlockIds += blockId
+      _executorIsDead = exception.isInstanceOf[ExecutorDeadException]
     }
+
+    def executorIsDead: Boolean = _executorIsDead
   }
 
   override def getHostLocalDirs(
@@ -188,11 +188,13 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
       listener: BlockFetchingListener,
       tempFileManager: DownloadFileManager
   ): Unit = {
-    val stateListener = BlockIdStateListener(listener)
-    // TODO: implement detecting / memorizing dead executors
-    val executorIsAlive = true
+    val executorIsAlive = deadExecutors.synchronized {
+      !deadExecutors.contains(execId)
+    }
+
     // TODO: what if non-shuffle blocks exist? blockIds.exists(!BlockId.apply(_).isShuffle)
     val pendingBlockIds = if (executorIsAlive && !readAlways) {
+      val stateListener = BlockIdStateListener(listener)
       try {
         logInfo(s"Fetching ${blockIds.length} blocks from executor $execId on $host:$port")
         // blockTransferService.fetchBlocks calls listener.onBlockFetchFailure for failed blockIds,
@@ -200,9 +202,15 @@ class BackupBlockTransferService(conf: SparkConf, blockTransferService: BlockTra
         blockTransferService.fetchBlocks(host, port, execId, blockIds, stateListener, tempFileManager)
       } catch {
         case e: Exception =>
-          logInfo(s"Reading from executor $execId failed", e)
-        // TODO: mark executor as dead
+          logInfo(s"Reading from executor $execId failed: ${e.getMessage}")
       }
+      // mark executor as dead
+      if (stateListener.executorIsDead) {
+        deadExecutors.synchronized {
+          deadExecutors += execId
+        }
+      }
+
       stateListener.failedBlockIds.toArray
     } else {
       blockIds
