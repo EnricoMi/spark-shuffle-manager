@@ -138,13 +138,15 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
     val dataFile = shuffleBlockResolver.getDataFile(handle.shuffleId, mapId)
     val indexFile = shuffleBlockResolver.getIndexFile(handle.shuffleId, mapId)
 
-    if (indexFile.exists()) {
-      Seq(dataFile, indexFile)
-        .filter(_.exists())
-        .map(path => new Path(Utils.resolveURI(path.getAbsolutePath)))
-        .map(path => SyncTask(path, getDestination(shuffleId, path.getName), fileSystem))
-        .map(syncExecutionContext.submit)
-        .foreach(syncTasks += (_))
+    syncTasks.synchronized {
+      if (indexFile.exists()) {
+        Seq(dataFile, indexFile)
+          .filter(_.exists())
+          .map(path => new Path(Utils.resolveURI(path.getAbsolutePath)))
+          .map(path => SyncTask(path, getDestination(shuffleId, path.getName), fileSystem))
+          .map(syncExecutionContext.submit)
+          .foreach(syncTasks += (_))
+      }
     }
   }
 
@@ -167,11 +169,13 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
 
     // wait or sync tasks to finish
     syncThreadPool.shutdown()
-    syncTasks
-      .map(task => Try(() => task.get()))
-      .filter(_.isFailure)
-      .map(_.failed.get)
-      .foreach(logWarning("copying file failed", _))
+    syncTasks.synchronized {
+      syncTasks
+        .map(task => Try(() => task.get()))
+        .filter(_.isFailure)
+        .map(_.failed.get)
+        .foreach(logWarning("copying file failed", _))
+    }
     syncExecutionContext.awaitTermination(1, TimeUnit.SECONDS)
 
     // stop underlying manager
