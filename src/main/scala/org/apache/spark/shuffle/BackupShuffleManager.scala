@@ -45,9 +45,10 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
     )
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
   private val fileSystem = FileSystem.get(backupPath.toUri, hadoopConf)
+  private val isDriver = conf.get(EXECUTOR_ID).exists(_.equals(SparkContext.DRIVER_IDENTIFIER))
 
-  // fail-fast on driver if this path cannot be accessed / written to
-  if (conf.get(EXECUTOR_ID).exists(_.equals(SparkContext.DRIVER_IDENTIFIER))) {
+  // fail-fast on driver if backup path cannot be accessed / written to
+  if (isDriver) {
     try {
       if (!fileSystem.exists(backupPath)) {
         fileSystem.mkdirs(backupPath)
@@ -57,11 +58,11 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
     }
   }
 
-  private val syncThreadPool =
-    ThreadUtils.newDaemonCachedThreadPool("backup-shuffle-manager-sync-thread-pool", 16)
-  private implicit val syncExecutionContext: ExecutionContextExecutorService =
-    ExecutionContext.fromExecutorService(syncThreadPool)
-  private val syncTasks: mutable.Buffer[Future[_]] = mutable.Buffer()
+  private val threadPool =
+    ThreadUtils.newDaemonCachedThreadPool("backup-shuffle-manager-thread-pool", 16)
+  private implicit val executionContext: ExecutionContextExecutorService =
+    ExecutionContext.fromExecutorService(threadPool)
+  private val tasks: mutable.Buffer[Future[_]] = mutable.Buffer()
 
   override def registerShuffle[K, V, C](shuffleId: Int, dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
     logInfo("registering shuffle id " + shuffleId)
@@ -138,48 +139,46 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
     val dataFile = shuffleBlockResolver.getDataFile(handle.shuffleId, mapId)
     val indexFile = shuffleBlockResolver.getIndexFile(handle.shuffleId, mapId)
 
-    syncTasks.synchronized {
+    tasks.synchronized {
       if (indexFile.exists()) {
         Seq(dataFile, indexFile)
           .filter(_.exists())
           .map(path => new Path(Utils.resolveURI(path.getAbsolutePath)))
           .map(path => SyncTask(path, getDestination(shuffleId, path.getName), fileSystem))
-          .map(syncExecutionContext.submit)
-          .foreach(syncTasks += (_))
+          .map(executionContext.submit)
+          .foreach(tasks += (_))
       }
     }
   }
 
-  private def removeDir(path: Path): Boolean = {
-    logInfo(f"removing $path")
-    Try(() => fileSystem.delete(path, true)).recover { case t: Throwable =>
-      logWarning(f"Failed to delete directory $path", t)
-    }.isSuccess
+  private def removeDir(path: Path): Unit = {
+    tasks.synchronized {
+      tasks += executionContext.submit(RemoveDirTask(path, fileSystem))
+    }
   }
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
     logInfo("unregistering shuffle id " + shuffleId)
-    val unregistered = super.unregisterShuffle(shuffleId)
-    val removed = removeDir(getDestination(shuffleId))
-    removed && unregistered
+    if (isDriver) removeDir(getDestination(shuffleId))
+    super.unregisterShuffle(shuffleId)
   }
 
   override def stop(): Unit = {
     logInfo("stopping manager")
 
+    // stop underlying manager
+    super.stop()
+
     // wait or sync tasks to finish
-    syncThreadPool.shutdown()
-    syncTasks.synchronized {
-      syncTasks
+    threadPool.shutdown()
+    tasks.synchronized {
+      tasks
         .map(task => Try(() => task.get()))
         .filter(_.isFailure)
         .map(_.failed.get)
         .foreach(logWarning("copying file failed", _))
     }
-    syncExecutionContext.awaitTermination(1, TimeUnit.SECONDS)
-
-    // stop underlying manager
-    super.stop()
+    executionContext.awaitTermination(1, TimeUnit.SECONDS)
   }
 }
 
@@ -188,5 +187,17 @@ case class SyncTask(source: Path, destination: Path, fileSystem: FileSystem) ext
     logInfo(s"copying $source to $destination")
     fileSystem.mkdirs(destination.getParent)
     fileSystem.copyFromLocalFile(source, destination)
+  }
+}
+
+case class RemoveDirTask(path: Path, fileSystem: FileSystem) extends Runnable with Logging {
+  override def run(): Unit = {
+    logInfo(f"removing $path")
+    Try {
+      val deleted = fileSystem.delete(path, true)
+      logInfo(s"removed $path: $deleted")
+    }.recover { case t: Throwable =>
+      logWarning(f"Failed to delete directory $path", t)
+    }
   }
 }
