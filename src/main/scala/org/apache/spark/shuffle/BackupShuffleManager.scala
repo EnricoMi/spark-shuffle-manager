@@ -159,8 +159,8 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
 
   override def unregisterShuffle(shuffleId: Int): Boolean = {
     logInfo("unregistering shuffle id " + shuffleId)
-    val removed = removeDir(getDestination(shuffleId))
     val unregistered = super.unregisterShuffle(shuffleId)
+    val removed = removeDir(getDestination(shuffleId))
     removed && unregistered
   }
 
