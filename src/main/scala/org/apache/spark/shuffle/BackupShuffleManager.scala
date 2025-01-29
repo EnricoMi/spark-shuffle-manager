@@ -169,6 +169,11 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
     // stop underlying manager
     super.stop()
 
+    // remove all shuffle data
+    if (isDriver) {
+      removeDir(new Path(backupPath, appId))
+    }
+
     // wait or sync tasks to finish
     threadPool.shutdown()
     tasks.synchronized {
