@@ -184,6 +184,8 @@ class BackupShuffleManager(val conf: SparkConf) extends SortShuffleManager(conf)
         .foreach(logWarning("copying file failed", _))
     }
     executionContext.awaitTermination(1, TimeUnit.SECONDS)
+
+    logInfo("stopped manager")
   }
 }
 
@@ -192,6 +194,7 @@ case class SyncTask(source: Path, destination: Path, fileSystem: FileSystem) ext
     logInfo(s"copying $source to $destination")
     fileSystem.mkdirs(destination.getParent)
     fileSystem.copyFromLocalFile(source, destination)
+    logInfo(s"copied $source to $destination")
   }
 }
 
@@ -199,10 +202,13 @@ case class RemoveDirTask(path: Path, fileSystem: FileSystem) extends Runnable wi
   override def run(): Unit = {
     logInfo(f"removing $path")
     Try {
-      val deleted = fileSystem.delete(path, true)
-      logInfo(s"removed $path: $deleted")
+      if (fileSystem.delete(path, true)) {
+        logInfo(s"removed $path")
+      } else {
+        logWarning(s"removing $path incomplete")
+      }
     }.recover { case t: Throwable =>
-      logWarning(f"Failed to delete directory $path", t)
+      logWarning(f"removing $path failed", t)
     }
   }
 }
